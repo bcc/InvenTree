@@ -178,6 +178,16 @@ class StockItem(MPTTModel):
                 system=True
             )
 
+        # Has my serial changed?
+        stock = StockItem.objects.filter(pk=self.pk)
+        if stock.first().serial != self.serial:
+            self.addTransactionNote(
+                'Changed Serial Number',
+                user,
+                notes="Serial changed from '{p}' to {q}".format(p=str(stock.first().serial),q=str(self.serial)),
+                system=True
+            )
+
     @property
     def status_label(self):
 
