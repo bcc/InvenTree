@@ -159,9 +159,15 @@ class StockItem(MPTTModel):
         if not self.pk:
             # StockItem has not yet been saved
             add_note = True
+
+            original_serial = None
         else:
             # StockItem has already been saved
             add_note = False
+
+            # Has my serial changed?
+            stock = StockItem.objects.filter(pk=self.pk)
+            original_serial = stock.first().serial
 
         user = kwargs.pop('user', None)
         
@@ -178,13 +184,12 @@ class StockItem(MPTTModel):
                 system=True
             )
 
-        # Has my serial changed?
-        stock = StockItem.objects.filter(pk=self.pk)
-        if stock.first().serial != self.serial:
+        #raise Exception('sigh')
+        if original_serial != self.serial:
             self.addTransactionNote(
                 'Changed Serial Number',
                 user,
-                notes="Serial changed from '{p}' to {q}".format(p=str(stock.first().serial),q=str(self.serial)),
+                notes="Serial changed from '{p}' to '{q}'".format(p=str(original_serial),q=str(self.serial)),
                 system=True
             )
 
