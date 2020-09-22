@@ -186,7 +186,7 @@ class StockCount(StockAdjust):
 
 class StockAdd(StockAdjust):
     """
-    Endpoint for adding stock
+    Endpoint for adding a quantity of stock to an existing StockItem
     """
 
     def post(self, request, *args, **kwargs):
@@ -204,7 +204,7 @@ class StockAdd(StockAdjust):
 
 class StockRemove(StockAdjust):
     """
-    Endpoint for removing stock.
+    Endpoint for removing a quantity of stock from an existing StockItem.
     """
 
     def post(self, request, *args, **kwargs):
@@ -439,6 +439,8 @@ class StockList(generics.ListCreateAPIView):
     def filter_queryset(self, queryset):
 
         params = self.request.query_params
+
+        queryset = super().filter_queryset(queryset)
 
         # Perform basic filtering:
         # Note: We do not let DRF filter here, it be slow AF
@@ -678,6 +680,14 @@ class StockList(generics.ListCreateAPIView):
     ]
 
     filter_fields = [
+    ]
+
+    search_fields = [
+        'serial',
+        'batch',
+        'part__name',
+        'part__IPN',
+        'part__description'
     ]
 
 

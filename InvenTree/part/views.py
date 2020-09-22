@@ -26,6 +26,7 @@ from .models import PartParameterTemplate, PartParameter
 from .models import BomItem
 from .models import match_part_names
 from .models import PartTestTemplate
+from .models import PartSellPriceBreak
 
 from common.models import Currency, InvenTreeSetting
 from company.models import SupplierPart
@@ -301,7 +302,13 @@ class MakePartVariant(AjaxCreateView):
         form = super(AjaxCreateView, self).get_form()
 
         # Hide some variant-related fields
-        form.fields['variant_of'].widget = HiddenInput()
+        # form.fields['variant_of'].widget = HiddenInput()
+
+        # Force display of the 'bom_copy' widget
+        form.fields['bom_copy'].widget = CheckboxInput()
+
+        # Force display of the 'parameters_copy' widget
+        form.fields['parameters_copy'].widget = CheckboxInput()
 
         return form
 
@@ -329,8 +336,11 @@ class MakePartVariant(AjaxCreateView):
             data['text'] = str(part)
             data['url'] = part.get_absolute_url()
 
+            bom_copy = str2bool(request.POST.get('bom_copy', False))
+            parameters_copy = str2bool(request.POST.get('parameters_copy', False))
+
             # Copy relevent information from the template part
-            part.deepCopy(part_template, bom=True)
+            part.deepCopy(part_template, bom=bom_copy, parameters=parameters_copy)
 
         return self.renderJsonResponse(request, form, data, context=context)
 
@@ -377,15 +387,19 @@ class PartDuplicate(AjaxCreateView):
     def get_form(self):
         form = super(AjaxCreateView, self).get_form()
 
-        # Force display of the 'deep_copy' widget
-        form.fields['deep_copy'].widget = CheckboxInput()
+        # Force display of the 'bom_copy' widget
+        form.fields['bom_copy'].widget = CheckboxInput()
+
+        # Force display of the 'parameters_copy' widget
+        form.fields['parameters_copy'].widget = CheckboxInput()
 
         return form
 
     def post(self, request, *args, **kwargs):
         """ Capture the POST request for part duplication
 
-        - If the deep_copy object is set, copy all the BOM items too!
+        - If the bom_copy object is set, copy all the BOM items too!
+        - If the parameters_copy object is set, copy all the parameters too!
         """
 
         form = self.get_form()
@@ -428,12 +442,13 @@ class PartDuplicate(AjaxCreateView):
             data['pk'] = part.pk
             data['text'] = str(part)
 
-            deep_copy = str2bool(request.POST.get('deep_copy', False))
+            bom_copy = str2bool(request.POST.get('bom_copy', False))
+            parameters_copy = str2bool(request.POST.get('parameters_copy', False))
 
             original = self.get_part_to_copy()
 
             if original:
-                part.deepCopy(original, bom=deep_copy)
+                part.deepCopy(original, bom=bom_copy, parameters=parameters_copy)
 
             try:
                 data['url'] = part.get_absolute_url()
@@ -456,7 +471,9 @@ class PartDuplicate(AjaxCreateView):
         else:
             initials = super(AjaxCreateView, self).get_initial()
 
-        initials['deep_copy'] = str2bool(InvenTreeSetting.get_setting('part_deep_copy', True))
+        initials['bom_copy'] = str2bool(InvenTreeSetting.get_setting('part_deep_copy', True))
+        # Create new entry in InvenTree/common/kvp.yaml?
+        initials['parameters_copy'] = str2bool(InvenTreeSetting.get_setting('part_deep_copy', True))
 
         return initials
 
@@ -645,6 +662,43 @@ class PartDetail(DetailView):
         context['disabled'] = not part.active
 
         return context
+
+
+class PartDetailFromIPN(PartDetail):
+    slug_field = 'IPN'
+    slug_url_kwarg = 'slug'
+
+    def get_object(self):
+        """ Return Part object which IPN field matches the slug value """
+        queryset = self.get_queryset()
+        # Get slug
+        slug = self.kwargs.get(self.slug_url_kwarg)
+
+        if slug is not None:
+            slug_field = self.get_slug_field()
+            # Filter by the slug value
+            queryset = queryset.filter(**{slug_field: slug})
+
+            try:
+                # Get unique part from queryset
+                part = queryset.get()
+                # Return Part object
+                return part
+            except queryset.model.MultipleObjectsReturned:
+                pass
+            except queryset.model.DoesNotExist:
+                pass
+        
+        return None
+
+    def get(self, request, *args, **kwargs):
+        """ Attempt to match slug to a Part, else redirect to PartIndex view """
+        self.object = self.get_object()
+
+        if not self.object:
+            return HttpResponseRedirect(reverse('part-index'))
+
+        return super(PartDetailFromIPN, self).get(request, *args, **kwargs)
 
 
 class PartQRCode(QRCodeView):
@@ -2044,3 +2098,75 @@ class BomItemDelete(AjaxDeleteView):
     ajax_template_name = 'part/bom-delete.html'
     context_object_name = 'item'
     ajax_form_title = _('Confim BOM item deletion')
+
+
+class PartSalePriceBreakCreate(AjaxCreateView):
+    """ View for creating a sale price break for a part """
+
+    model = PartSellPriceBreak
+    form_class = part_forms.EditPartSalePriceBreakForm
+    ajax_form_title = _('Add Price Break')
+    
+    def get_data(self):
+        return {
+            'success': _('Added new price break')
+        }
+
+    def get_part(self):
+        try:
+            part = Part.objects.get(id=self.request.GET.get('part'))
+        except (ValueError, Part.DoesNotExist):
+            part = None
+        
+        if part is None:
+            try:
+                part = Part.objects.get(id=self.request.POST.get('part'))
+            except (ValueError, Part.DoesNotExist):
+                part = None
+
+        return part
+
+    def get_form(self):
+
+        form = super(AjaxCreateView, self).get_form()
+        form.fields['part'].widget = HiddenInput()
+
+        return form
+
+    def get_initial(self):
+
+        initials = super(AjaxCreateView, self).get_initial()
+
+        initials['part'] = self.get_part()
+
+        # Pre-select the default currency
+        try:
+            base = Currency.objects.get(base=True)
+            initials['currency'] = base
+        except Currency.DoesNotExist:
+            pass
+
+        return initials
+
+
+class PartSalePriceBreakEdit(AjaxUpdateView):
+    """ View for editing a sale price break """
+
+    model = PartSellPriceBreak
+    form_class = part_forms.EditPartSalePriceBreakForm
+    ajax_form_title = _('Edit Price Break')
+
+    def get_form(self):
+
+        form = super().get_form()
+        form.fields['part'].widget = HiddenInput()
+
+        return form
+
+    
+class PartSalePriceBreakDelete(AjaxDeleteView):
+    """ View for deleting a sale price break """
+
+    model = PartSellPriceBreak
+    ajax_form_title = _("Delete Price Break")
+    ajax_template_name = "modal_delete_form.html"

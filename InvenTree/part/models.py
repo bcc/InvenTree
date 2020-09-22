@@ -46,6 +46,8 @@ from order import models as OrderModels
 from company.models import SupplierPart
 from stock import models as StockModels
 
+import common.models
+
 
 class PartCategory(InvenTreeTree):
     """ PartCategory provides hierarchical organization of Part objects.
@@ -319,9 +321,12 @@ class Part(MPTTModel):
 
         return stock.exists()
 
-    def getHighestSerialNumber(self):
+    def getLatestSerialNumber(self):
         """
-        Return the highest serial number for this Part.
+        Return the "latest" serial number for this Part.
+
+        If *all* the serial numbers are integers, then this will return the highest one.
+        Otherwise, it will simply return the serial number most recently added.
 
         Note: Serial numbers must be unique across an entire Part "tree",
         so we filter by the entire tree.
@@ -330,53 +335,61 @@ class Part(MPTTModel):
         parts = Part.objects.filter(tree_id=self.tree_id)
         stock = StockModels.StockItem.objects.filter(part__in=parts).exclude(serial=None)
         
+        # There are no matchin StockItem objects (skip further tests)
+        if not stock.exists():
+            return None
+
+        # Attempt to coerce the returned serial numbers to integers
+        # If *any* are not integers, fail!
         try:
             ordered = sorted(stock.all(), reverse=True, key=lambda n: int(n.serial))
 
             if len(ordered) > 0:
                 return ordered[0].serial
 
-        # Non-numeric serials, so don't suggest one.
+        # One or more of the serial numbers was non-numeric
+        # In this case, the "best" we can do is return the most recent
         except ValueError:
-            return None
+            return stock.last().serial
 
         # No serial numbers found
-        return 0
+        return None
 
-
-    def getNextSerialNumber(self):
-        """
-        Return the next-available serial number for this Part.
-        """
-
-        n = self.getHighestSerialNumber()
-
-        if n is None:
-            return None
-        else:
-            return int(n) + 1
-
-
-    def getSerialNumberString(self, quantity):
+    def getSerialNumberString(self, quantity=1):
         """
         Return a formatted string representing the next available serial numbers,
         given a certain quantity of items.
         """
 
-        sn = self.getNextSerialNumber()
+        latest = self.getLatestSerialNumber()
 
-        if sn is None:
-            return None
+        quantity = int(quantity)
 
-        if quantity >= 2:
-            sn = "{n}-{m}".format(
-                n=sn,
-                m=int(sn + quantity - 1)
-            )
+        # No serial numbers can be found, assume 1 as the first serial
+        if latest is None:
+            latest = 0
+
+        # Attempt to turn into an integer
+        try:
+            latest = int(latest)
+        except:
+            pass
+
+        if type(latest) is int:
+
+            if quantity >= 2:
+                text = '{n} - {m}'.format(n=latest + 1, m=latest + 1 + quantity)
+
+                return _('Next available serial numbers are') + ' ' + text
+            else:
+                text = str(latest)
+
+                return _('Next available serial number is') + ' ' + text
+
         else:
-            sn = str(sn)
+            # Non-integer values, no option but to return latest
 
-        return sn
+            return _('Most recent serial number is') + ' ' + str(latest)
 
     @property
     def full_name(self):
@@ -486,18 +499,18 @@ class Part(MPTTModel):
 
     description = models.CharField(max_length=250, blank=False, help_text=_('Part description'))
 
-    keywords = models.CharField(max_length=250, blank=True, help_text=_('Part keywords to improve visibility in search results'))
+    keywords = models.CharField(max_length=250, blank=True, null=True, help_text=_('Part keywords to improve visibility in search results'))
 
     category = TreeForeignKey(PartCategory, related_name='parts',
                               null=True, blank=True,
                               on_delete=models.DO_NOTHING,
                               help_text=_('Part category'))
 
-    IPN = models.CharField(max_length=100, blank=True, help_text=_('Internal Part Number'), validators=[validators.validate_part_ipn])
+    IPN = models.CharField(max_length=100, blank=True, null=True, help_text=_('Internal Part Number'), validators=[validators.validate_part_ipn])
 
-    revision = models.CharField(max_length=100, blank=True, help_text=_('Part revision or version number'))
+    revision = models.CharField(max_length=100, blank=True, null=True, help_text=_('Part revision or version number'))
 
-    link = InvenTreeURLField(blank=True, help_text=_('Link to extenal URL'))
+    link = InvenTreeURLField(blank=True, null=True, help_text=_('Link to extenal URL'))
 
     image = StdImageField(
         upload_to=rename_part_image,
@@ -558,7 +571,7 @@ class Part(MPTTModel):
 
     minimum_stock = models.PositiveIntegerField(default=0, validators=[MinValueValidator(0)], help_text=_('Minimum allowed stock level'))
 
-    units = models.CharField(max_length=20, default="", blank=True, help_text=_('Stock keeping units for this part'))
+    units = models.CharField(max_length=20, default="", blank=True, null=True, help_text=_('Stock keeping units for this part'))
 
     assembly = models.BooleanField(default=False, verbose_name='Assembly', help_text=_('Can this part be built from other parts?'))
 
@@ -574,7 +587,7 @@ class Part(MPTTModel):
 
     virtual = models.BooleanField(default=False, help_text=_('Is this a virtual part, such as a software product or license?'))
 
-    notes = MarkdownxField(blank=True, help_text=_('Part notes - supports Markdown formatting'))
+    notes = MarkdownxField(blank=True, null=True, help_text=_('Part notes - supports Markdown formatting'))
 
     bom_checksum = models.CharField(max_length=128, blank=True, help_text=_('Stored BOM checksum'))
 
@@ -834,7 +847,6 @@ class Part(MPTTModel):
 
         return str(hash.digest())
 
-    @property
     def is_bom_valid(self):
         """ Check if the BOM is 'valid' - if the calculated checksum matches the stored value
         """
@@ -1030,6 +1042,7 @@ class Part(MPTTModel):
         Keyword Args:
             image: If True, copies Part image (default = True)
             bom: If True, copies BOM data (default = False)
+            parameters: If True, copies Parameters data (default = True)
         """
 
         # Copy the part image
@@ -1046,6 +1059,17 @@ class Part(MPTTModel):
                 item.part = self
                 item.pk = None
                 item.save()
+
+        # Copy the parameters data
+        if kwargs.get('parameters', True):
+            # Get template part parameters
+            parameters = other.get_parameters()
+            # Copy template part parameters to new variant part
+            for parameter in parameters:
+                PartParameter.create(part=self,
+                                     template=parameter.template,
+                                     data=parameter.data,
+                                     save=True)
 
         # Copy the fields that aren't available in the duplicate form
         self.salable = other.salable
@@ -1092,12 +1116,21 @@ class Part(MPTTModel):
 
         """
 
-        n = self.attachments.count()
+        return self.part_attachments.count()
 
-        if self.variant_of:
-            n += self.variant_of.attachments.count()
+    @property
+    def part_attachments(self):
+        """
+        Return *all* attachments for this part,
+        potentially including attachments for template parts
+        above this one.
+        """
 
-        return n
+        ancestors = self.get_ancestors(include_self=True)
+
+        attachments = PartAttachment.objects.filter(part__in=ancestors)
+
+        return attachments
 
     def sales_orders(self):
         """ Return a list of sales orders which reference this part """
@@ -1193,6 +1226,21 @@ class PartAttachment(InvenTreeAttachment):
 
     part = models.ForeignKey(Part, on_delete=models.CASCADE,
                              related_name='attachments')
+
+
+class PartSellPriceBreak(common.models.PriceBreak):
+    """
+    Represents a price break for selling this part
+    """
+
+    part = models.ForeignKey(
+        Part, on_delete=models.CASCADE,
+        related_name='salepricebreaks',
+        limit_choices_to={'salable': True}
+    )
+
+    class Meta:
+        unique_together = ('part', 'quantity')
 
 
 class PartStar(models.Model):
@@ -1381,6 +1429,13 @@ class PartParameter(models.Model):
     template = models.ForeignKey(PartParameterTemplate, on_delete=models.CASCADE, related_name='instances', help_text=_('Parameter Template'))
 
     data = models.CharField(max_length=500, help_text=_('Parameter Value'))
+
+    @classmethod
+    def create(cls, part, template, data, save=False):
+        part_parameter = cls(part=part, template=template, data=data)
+        if save:
+            part_parameter.save()
+        return part_parameter
 
 
 class BomItem(models.Model):

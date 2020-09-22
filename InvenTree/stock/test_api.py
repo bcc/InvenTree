@@ -21,7 +21,7 @@ class StockAPITestCase(APITestCase):
     def setUp(self):
         # Create a user for auth
         User = get_user_model()
-        User.objects.create_user('testuser', 'test@testing.com', 'password')
+        self.user = User.objects.create_user('testuser', 'test@testing.com', 'password')
         self.client.login(username='testuser', password='password')
 
     def doPost(self, url, data={}):
@@ -80,6 +80,59 @@ class StockItemTest(StockAPITestCase):
     def test_get_stock_list(self):
         response = self.client.get(self.list_url, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_stock_item_create(self):
+        """
+        Test creation of a StockItem via the API
+        """
+
+        # POST with an empty part reference
+
+        response = self.client.post(
+            self.list_url,
+            data={
+                'quantity': 10,
+                'location': 1
+            }
+        )
+
+        self.assertContains(response, 'This field is required', status_code=status.HTTP_400_BAD_REQUEST)
+        
+        # POST with an invalid part reference
+
+        response = self.client.post(
+            self.list_url,
+            data={
+                'quantity': 10,
+                'location': 1,
+                'part': 10000000,
+            }
+        )
+
+        self.assertContains(response, 'does not exist', status_code=status.HTTP_400_BAD_REQUEST)
+
+        # POST without quantity
+        response = self.client.post(
+            self.list_url,
+            data={
+                'part': 1,
+                'location': 1,
+            }
+        )
+
+        self.assertContains(response, 'This field is required', status_code=status.HTTP_400_BAD_REQUEST)
+
+        # POST with quantity and part and location
+        response = self.client.post(
+            self.list_url,
+            data={
+                'part': 1,
+                'location': 1,
+                'quantity': 10,
+            }
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
 
 class StocktakeTest(StockAPITestCase):
@@ -255,4 +308,4 @@ class StockTestResultTest(StockAPITestCase):
 
         test = response.data[0]
         self.assertEqual(test['value'], '150kPa')
-        self.assertEqual(test['user'], 1)
+        self.assertEqual(test['user'], self.user.pk)

@@ -51,18 +51,21 @@ class CompanyIndex(ListView):
                 'button_text': _('New Supplier'),
                 'filters': {'is_supplier': 'true'},
                 'create_url': reverse('supplier-create'),
+                'pagetype': 'suppliers',
             },
             reverse('manufacturer-index'): {
                 'title': _('Manufacturers'),
                 'button_text': _('New Manufacturer'),
                 'filters': {'is_manufacturer': 'true'},
                 'create_url': reverse('manufacturer-create'),
+                'pagetype': 'manufacturers',
             },
             reverse('customer-index'): {
                 'title': _('Customers'),
                 'button_text': _('New Customer'),
                 'filters': {'is_customer': 'true'},
                 'create_url': reverse('customer-create'),
+                'pagetype': 'customers',
             }
         }
 
@@ -71,6 +74,7 @@ class CompanyIndex(ListView):
             'button_text': _('New Company'),
             'filters': {},
             'create_url': reverse('company-create'),
+            'pagetype': 'companies'
         }
 
         context = None
@@ -397,7 +401,7 @@ class PriceBreakCreate(AjaxCreateView):
 
     def get_data(self):
         return {
-            'success': 'Added new price break'
+            'success': _('Added new price break')
         }
 
     def get_part(self):

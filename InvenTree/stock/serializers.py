@@ -9,8 +9,11 @@ from .models import StockItemTracking
 from .models import StockItemAttachment
 from .models import StockItemTestResult
 
-from django.db.models import Sum, Count
 from django.db.models.functions import Coalesce
+
+from sql_util.utils import SubquerySum, SubqueryCount
+
+from decimal import Decimal
 
 from company.serializers import SupplierPartSerializer
 from part.serializers import PartBriefSerializer
@@ -90,34 +93,25 @@ class StockItemSerializer(InvenTreeModelSerializer):
         performing database queries as efficiently as possible.
         """
 
+        # Annotate the queryset with the total allocated to sales orders
         queryset = queryset.annotate(
             allocated=Coalesce(
-                Sum('sales_order_allocations__quantity', distinct=True), 0) + Coalesce(
-                Sum('allocations__quantity', distinct=True), 0),
-            tracking_items=Count('tracking_info'),
+                SubquerySum('sales_order_allocations__quantity'), Decimal(0)
+            ) + Coalesce(
+                SubquerySum('allocations__quantity'), Decimal(0)
+            )
+        )
+
+        # Annotate the queryset with the number of tracking items
+        queryset = queryset.annotate(
+            tracking_items=SubqueryCount('tracking_info')
         )
 
         return queryset
 
-    belongs_to = serializers.PrimaryKeyRelatedField(read_only=True)
-
-    build_order = serializers.PrimaryKeyRelatedField(read_only=True)
-
-    customer = serializers.PrimaryKeyRelatedField(read_only=True)
-
-    location = serializers.PrimaryKeyRelatedField(read_only=True)
-
-    in_stock = serializers.BooleanField(read_only=True)
-
-    sales_order = serializers.PrimaryKeyRelatedField(read_only=True)
-
     status_text = serializers.CharField(source='get_status_display', read_only=True)
-    
-    supplier_part = serializers.PrimaryKeyRelatedField(read_only=True)
-    
+        
     supplier_part_detail = SupplierPartSerializer(source='supplier_part', many=False, read_only=True)
-
-    part = serializers.PrimaryKeyRelatedField(read_only=True)
 
     part_detail = PartBriefSerializer(source='part', many=False, read_only=True)
 

@@ -47,7 +47,7 @@ def managePyPath():
 
     return os.path.join(managePyDir(), 'manage.py')
 
-def manage(c, cmd):
+def manage(c, cmd, pty=False):
     """
     Runs a given command against django's "manage.py" script.
 
@@ -59,7 +59,7 @@ def manage(c, cmd):
     c.run('cd {path} && python3 manage.py {cmd}'.format(
         path=managePyDir(),
         cmd=cmd
-    ))
+    ), pty=pty)
 
 @task(help={'length': 'Length of secret key (default=50)'})
 def key(c, length=50, force=False):
@@ -106,7 +106,15 @@ def superuser(c):
     Create a superuser (admin) account for the database.
     """
 
-    manage(c, 'createsuperuser')
+    manage(c, 'createsuperuser', pty=True)
+
+@task
+def check(c):
+    """
+    Check validity of django codebase
+    """
+
+    manage(c, "check")
 
 @task
 def migrate(c):
@@ -162,7 +170,7 @@ def translate(c):
     or after adding translations for existing strings.
     """
 
-    manage(c, "makemigrations")
+    manage(c, "makemessages")
     manage(c, "compilemessages")
 
 @task
@@ -175,18 +183,15 @@ def style(c):
     c.run('flake8 InvenTree')
 
 @task
-def test(c):
+def test(c, database=None):
     """
     Run unit-tests for InvenTree codebase.
     """
-
     # Run sanity check on the django install
     manage(c, 'check')
 
     # Run coverage tests
-    manage(c, 'test {apps}'.format(
-        apps=' '.join(apps())
-    ))
+    manage(c, 'test', pty=True)
 
 @task
 def coverage(c):

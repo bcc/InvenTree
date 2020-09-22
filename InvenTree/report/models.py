@@ -89,7 +89,16 @@ class ReportTemplateBase(models.Model):
 
     @property
     def template_name(self):
-        return os.path.join('report_template', self.getSubdir(), os.path.basename(self.template.name))
+        """
+        Returns the file system path to the template file.
+        Required for passing the file to an external process (e.g. LaTeX)
+        """
+
+        template = os.path.join('report_template', self.getSubdir(), os.path.basename(self.template.name))
+        template = template.replace('/', os.path.sep)
+        template = template.replace('\\', os.path.sep)
+
+        return template
 
     def get_context_data(self, request):
         """
@@ -127,7 +136,7 @@ class ReportTemplateBase(models.Model):
                 except TexError:
                     return TexResponse(rendered, filename="error.tex")
             else:
-                return ValidationError("Enable LaTeX support in config.yaml")
+                raise ValidationError("Enable LaTeX support in config.yaml")
         elif self.extension in ['.htm', '.html']:
             # Render HTML template to PDF
             wp = WeasyprintReportMixin(request, self.template_name, **kwargs)

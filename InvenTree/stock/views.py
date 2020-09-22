@@ -1234,20 +1234,21 @@ class StockItemCreate(AjaxCreateView):
         part = self.get_part(form=form)
 
         if part is not None:
-            sn = part.getNextSerialNumber()
-            form.field_placeholder['serial_numbers'] = _('Next available serial number is') + ' ' + str(sn)
+
+            # Add placeholder text for the serial number field
+            form.field_placeholder['serial_numbers'] = part.getSerialNumberString()
 
             form.rebuild_layout()
 
             # Hide the 'part' field (as a valid part is selected)
             # form.fields['part'].widget = HiddenInput()
 
-            # trackable parts get special consideration
+            # Trackable parts get special consideration:
             if part.trackable:
                 form.fields['delete_on_deplete'].widget = HiddenInput()
                 form.fields['delete_on_deplete'].initial = False
             else:
-                form.fields.pop('serial_numbers')
+                form.fields['serial_numbers'].widget = HiddenInput()
 
             # If the part is NOT purchaseable, hide the supplier_part field
             if not part.purchaseable:
@@ -1305,11 +1306,9 @@ class StockItemCreate(AjaxCreateView):
         supplier_part = None
 
         if part is not None:
-            # Check that the supplied part is 'valid'
-            if not part.is_template and part.active and not part.virtual:
-                initials['part'] = part
-                initials['location'] = part.get_default_location()
-                initials['supplier_part'] = part.default_supplier
+            initials['part'] = part
+            initials['location'] = part.get_default_location()
+            initials['supplier_part'] = part.default_supplier
 
         # SupplierPart field has been specified
         # It must match the Part, if that has been supplied
@@ -1352,11 +1351,6 @@ class StockItemCreate(AjaxCreateView):
             try:
                 part = Part.objects.get(id=part_id)
                 quantity = Decimal(form['quantity'].value())
-
-                sn = part.getNextSerialNumber()
-                form.field_placeholder['serial_numbers'] = _("Next available serial number is") + " " + str(sn)
-
-                form.rebuild_layout()
 
             except (Part.DoesNotExist, ValueError, InvalidOperation):
                 part = None

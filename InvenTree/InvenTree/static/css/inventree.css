@@ -82,9 +82,10 @@
     float: left;
 }
 
-.navbar-barcode-li {
+#navbar-barcode-li {
     border-left: none;
     border-right: none;
+    padding-right: 5px;
 }
 
 .navbar-nav > li {
@@ -413,6 +414,10 @@
     font-size: 125%;
 }
 
+.btn-group {
+    padding-bottom: 5px;
+}
+
 .action-buttons .btn {
     font-size: 175%;
     align-content: center;
@@ -474,6 +479,7 @@
 
 .media {
     padding-top: 15px;
+    overflow: visible;
 }
 
 .media-body {

@@ -36,8 +36,14 @@
         {% if part.trackable %}
         <tr>
             <td><span class='fas fa-hashtag'></span></td>
-            <td><b>{% trans "Next Serial Number" %}</b></td>
-            <td>{{ part.getNextSerialNumber }}</td>
+            <td><b>{% trans "Latest Serial Number" %}</b></td>
+            <td>
+                {% if part.getLatestSerialNumber %}
+                {{ part.getLatestSerialNumber }}
+                {% else %}
+                {% trans "No serial numbers recorded" %}
+                {% endif %}
+            </td>
         </tr>
         {% endif %}
         <tr>
@@ -212,14 +218,13 @@
     {{ block.super }}
 
     $(".slidey").change(function() {
-        var field = $(this).attr('field');
+        var field = $(this).attr('fieldname');
 
         var checked = $(this).prop('checked');
 
         var data = {};
 
         data[field] = checked;
-
         // Update the particular field
         inventreePut("{% url 'api-part-detail' part.id %}",
             data,
@@ -227,51 +232,6 @@
                 method: 'PATCH',
                 reloadOnSuccess: true,
             },
-        );
-    });
-
-    $('#activate-part').click(function() {
-        showQuestionDialog(
-            'Activate Part?',
-            'Are you sure you wish to reactivate {{ part.full_name }}?',
-            {
-                accept_text: 'Activate',
-                accept: function() {
-                    inventreePut(
-                        "{% url 'api-part-detail' part.id %}",
-                        {
-                            active: true,
-                        },
-                        {
-                            method: 'PATCH',
-                            reloadOnSuccess: true,
-                        }
-                    );
-                }
-            },
-        );
-    });
-
-    $('#deactivate-part').click(function() {
-        showQuestionDialog(
-            'Deactivate Part?',
-            `Are you sure you wish to deactivate {{ part.full_name }}?<br>
-            `,
-            {
-                accept_text: 'Deactivate',
-                accept: function() {
-                    inventreePut(
-                        "{% url 'api-part-detail' part.id %}",
-                        {
-                            active: false,
-                        },
-                        {
-                            method: 'PATCH',
-                            reloadOnSuccess: true,
-                        }
-                    );
-                }
-            }
         );
     });
     

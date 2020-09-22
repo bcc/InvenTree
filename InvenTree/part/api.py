@@ -20,6 +20,7 @@ from django.urls import reverse
 from .models import Part, PartCategory, BomItem, PartStar
 from .models import PartParameter, PartParameterTemplate
 from .models import PartAttachment, PartTestTemplate
+from .models import PartSellPriceBreak
 
 from . import serializers as part_serializers
 
@@ -105,6 +106,27 @@ class CategoryDetail(generics.RetrieveUpdateDestroyAPIView):
     """ API endpoint for detail view of a single PartCategory object """
     serializer_class = part_serializers.CategorySerializer
     queryset = PartCategory.objects.all()
+
+
+class PartSalePriceList(generics.ListCreateAPIView):
+    """
+    API endpoint for list view of PartSalePriceBreak model
+    """
+
+    queryset = PartSellPriceBreak.objects.all()
+    serializer_class = part_serializers.PartSalePriceSerializer
+
+    permission_classes = [
+        permissions.IsAuthenticated,
+    ]
+
+    filter_backends = [
+        DjangoFilterBackend
+    ]
+
+    filter_fields = [
+        'part',
+    ]
 
 
 class PartAttachmentList(generics.ListCreateAPIView, AttachmentMixin):
@@ -275,6 +297,7 @@ class PartList(generics.ListCreateAPIView):
         - purchaseable: Filter by purcahseable field
         - salable: Filter by salable field
         - active: Filter by active field
+        - ancestor: Filter parts by 'ancestor' (template / variant tree)
     """
 
     serializer_class = part_serializers.PartSerializer
@@ -376,6 +399,7 @@ class PartList(generics.ListCreateAPIView):
     def get_queryset(self, *args, **kwargs):
 
         queryset = super().get_queryset(*args, **kwargs)
+        
         queryset = part_serializers.PartSerializer.prefetch_queryset(queryset)
         queryset = part_serializers.PartSerializer.annotate_queryset(queryset)
 
@@ -387,10 +411,46 @@ class PartList(generics.ListCreateAPIView):
         We overide the DRF filter_fields here because
         """
 
+        params = self.request.query_params
+
         queryset = super().filter_queryset(queryset)
 
+        # Filter by 'ancestor'?
+        ancestor = params.get('ancestor', None)
+
+        if ancestor is not None:
+            # If an 'ancestor' part is provided, filter to match only children
+            try:
+                ancestor = Part.objects.get(pk=ancestor)
+                descendants = ancestor.get_descendants(include_self=False)
+                queryset = queryset.filter(pk__in=[d.pk for d in descendants])
+            except (ValueError, Part.DoesNotExist):
+                pass
+
+        # Filter by whether the BOM has been validated (or not)
+        bom_valid = params.get('bom_valid', None)
+
+        # TODO: Querying bom_valid status may be quite expensive
+        # TODO: (It needs to be profiled!)
+        # TODO: It might be worth caching the bom_valid status to a database column
+
+        if bom_valid is not None:
+
+            bom_valid = str2bool(bom_valid)
+
+            # Limit queryset to active assemblies
+            queryset = queryset.filter(active=True, assembly=True)
+
+            pks = []
+
+            for part in queryset:
+                if part.is_bom_valid() == bom_valid:
+                    pks.append(part.pk)
+
+            queryset = queryset.filter(pk__in=pks)
+
         # Filter by 'starred' parts?
-        starred = self.request.query_params.get('starred', None)
+        starred = params.get('starred', None)
 
         if starred is not None:
             starred = str2bool(starred)
@@ -402,10 +462,10 @@ class PartList(generics.ListCreateAPIView):
                 queryset = queryset.exclude(pk__in=starred_parts)
 
         # Cascade?
-        cascade = str2bool(self.request.query_params.get('cascade', None))
+        cascade = str2bool(params.get('cascade', None))
 
         # Does the user wish to filter by category?
-        cat_id = self.request.query_params.get('category', None)
+        cat_id = params.get('category', None)
 
         if cat_id is None:
             # No category filtering if category is not specified
@@ -437,7 +497,8 @@ class PartList(generics.ListCreateAPIView):
         queryset = part_serializers.PartSerializer.annotate_queryset(queryset)
 
         # Filter by whether the part has stock
-        has_stock = self.request.query_params.get("has_stock", None)
+        has_stock = params.get("has_stock", None)
+
         if has_stock is not None:
             has_stock = str2bool(has_stock)
 
@@ -447,7 +508,7 @@ class PartList(generics.ListCreateAPIView):
                 queryset = queryset.filter(Q(in_stock__lte=0))
 
         # If we are filtering by 'low_stock' status
-        low_stock = self.request.query_params.get('low_stock', None)
+        low_stock = params.get('low_stock', None)
 
         if low_stock is not None:
             low_stock = str2bool(low_stock)
@@ -460,6 +521,36 @@ class PartList(generics.ListCreateAPIView):
             else:
                 # Filter items which have an 'in_stock' level higher than 'minimum_stock'
                 queryset = queryset.filter(Q(in_stock__gte=F('minimum_stock')))
+
+        # Filter by "parts which need stock to complete build"
+        stock_to_build = params.get('stock_to_build', None)
+
+        # TODO: This is super expensive, database query wise...
+        # TODO: Need to figure out a cheaper way of making this filter query
+
+        if stock_to_build is not None:
+            # Filter only active parts
+            queryset = queryset.filter(active=True)
+            parts_need_stock = []
+
+            # Find parts with active builds
+            # where any subpart's stock is lower than quantity being built
+            for part in queryset:
+                if part.active_builds and part.can_build < part.quantity_being_built:
+                    parts_need_stock.append(part.pk)
+
+            queryset = queryset.filter(pk__in=parts_need_stock)
+
+        # Limit choices
+        limit = params.get('limit', None)
+
+        if limit is not None:
+            try:
+                limit = int(limit)
+                if limit > 0:
+                    queryset = queryset[:limit]
+            except ValueError:
+                pass
 
         return queryset
 
@@ -486,6 +577,7 @@ class PartList(generics.ListCreateAPIView):
 
     ordering_fields = [
         'name',
+        'creation_date',
     ]
 
     # Default ordering
@@ -738,6 +830,11 @@ part_api_urls = [
     url(r'^star/', include([
         url(r'^(?P<pk>\d+)/?', PartStarDetail.as_view(), name='api-part-star-detail'),
         url(r'^$', PartStarList.as_view(), name='api-part-star-list'),
+    ])),
+
+    # Base URL for part sale pricing
+    url(r'^sale-price/', include([
+        url(r'^.*$', PartSalePriceList.as_view(), name='api-part-sale-price-list'),
     ])),
     
     # Base URL for PartParameter API endpoints
