@@ -13,6 +13,8 @@ from django.template.loader import render_to_string
 from django.http import JsonResponse, HttpResponseRedirect
 from django.urls import reverse_lazy
 
+from django.contrib.auth.mixins import PermissionRequiredMixin
+
 from django.views import View
 from django.views.generic import UpdateView, CreateView, FormView
 from django.views.generic.base import TemplateView
@@ -20,8 +22,10 @@ from django.views.generic.base import TemplateView
 from part.models import Part, PartCategory
 from stock.models import StockLocation, StockItem
 from common.models import InvenTreeSetting, ColorTheme
+from users.models import check_user_role, RuleSet
 
-from .forms import DeleteForm, EditUserForm, SetPasswordForm, ColorThemeSelectForm
+from .forms import DeleteForm, EditUserForm, SetPasswordForm
+from .forms import ColorThemeSelectForm, SettingCategorySelectForm
 from .helpers import str2bool
 
 from rest_framework import views
@@ -105,11 +109,76 @@ class TreeSerializer(views.APIView):
         return JsonResponse(response, safe=False)
 
 
-class AjaxMixin(object):
+class InvenTreeRoleMixin(PermissionRequiredMixin):
+    """
+    Permission class based on user roles, not user 'permissions'.
+
+    To specify which role is required for the mixin,
+    set the class attribute 'role_required' to something like the following:
+
+    role_required = 'part.add'
+    role_required = [
+        'part.change',
+        'build.add',
+    ]
+    """
+
+    # By default, no roles are required
+    # Roles must be specified
+    role_required = None
+
+    def has_permission(self):
+        """
+        Determine if the current user has specified permissions
+        """
+
+        if self.permission_required:
+            # Ignore role-based permissions
+            return super().has_permission()
+
+        roles_required = []
+
+        if type(self.role_required) is str:
+            roles_required.append(self.role_required)
+        elif type(self.role_required) in [list, tuple]:
+            roles_required = self.role_required
+
+        user = self.request.user
+
+        # Superuser can have any permissions they desire
+        if user.is_superuser:
+            return True
+
+        for required in roles_required:
+
+            (role, permission) = required.split('.')
+
+            if role not in RuleSet.RULESET_NAMES:
+                raise ValueError(f"Role '{role}' is not a valid role")
+            
+            if permission not in RuleSet.RULESET_PERMISSIONS:
+                raise ValueError(f"Permission '{permission}' is not a valid permission")
+
+            # Return False if the user does not have *any* of the required roles
+            if not check_user_role(user, role, permission):
+                return False
+
+        # We did not fail any required checks
+        return True
+
+
+class AjaxMixin(InvenTreeRoleMixin):
     """ AjaxMixin provides basic functionality for rendering a Django form to JSON.
     Handles jsonResponse rendering, and adds extra data for the modal forms to process
     on the client side.
+
+    Any view which inherits the AjaxMixin will need
+    correct permissions set using the 'role_required' attribute
+
     """
+
+    # By default, allow *any* role
+    role_required = None
 
     # By default, point to the modal_form template
     # (this can be overridden by a child class)
@@ -144,6 +213,19 @@ class AjaxMixin(object):
             dict object (empty)
         """
         return {}
+
+    def validate(self, obj, form, **kwargs):
+        """
+        Hook for performing custom form validation steps.
+
+        If a form error is detected, add it to the form,
+        with 'form.add_error()'
+
+        Ref: https://docs.djangoproject.com/en/dev/topics/forms/
+        """
+
+        # Do nothing by default
+        pass
 
     def renderJsonResponse(self, request, form=None, data={}, context=None):
         """ Render a JSON response based on specific class context.
@@ -252,18 +334,6 @@ class AjaxCreateView(AjaxMixin, CreateView):
     - Handles form validation via AJAX POST requests
     """
 
-    def pre_save(self, **kwargs):
-        """
-        Hook for doing something before the form is validated
-        """
-        pass
-
-    def post_save(self, **kwargs):
-        """
-        Hook for doing something with the created object after it is saved
-        """
-        pass
-
     def get(self, request, *args, **kwargs):
         """ Creates form with initial data, and renders JSON response """
 
@@ -272,6 +342,17 @@ class AjaxCreateView(AjaxMixin, CreateView):
         self.request = request
         form = self.get_form()
         return self.renderJsonResponse(request, form)
+
+    def save(self, form):
+        """
+        Method for actually saving the form to the database.
+        Default implementation is very simple,
+        but can be overridden if required.
+        """
+
+        self.object = form.save()
+
+        return self.object
 
     def post(self, request, *args, **kwargs):
         """ Responds to form POST. Validates POST data and returns status info.
@@ -283,25 +364,39 @@ class AjaxCreateView(AjaxMixin, CreateView):
         self.request = request
         self.form = self.get_form()
 
+        # Perform initial form validation
+        self.form.is_valid()
+
+        # Perform custom validation (no object can be provided yet)
+        self.validate(None, self.form)
+
+        valid = self.form.is_valid()
+
         # Extra JSON data sent alongside form
         data = {
-            'form_valid': self.form.is_valid(),
+            'form_valid': valid,
+            'form_errors': self.form.errors.as_json(),
+            'non_field_errors': self.form.non_field_errors().as_json(),
         }
 
-        if self.form.is_valid():
+        # Add in any extra class data
+        for value, key in enumerate(self.get_data()):
+            data[key] = value
 
-            self.pre_save()
-            self.object = self.form.save()
-            self.post_save()
+        if valid:
 
-            # Return the PK of the newly-created object
-            data['pk'] = self.object.pk
-            data['text'] = str(self.object)
+            # Save the object to the database
+            self.object = self.save(self.form)
 
-            try:
-                data['url'] = self.object.get_absolute_url()
-            except AttributeError:
-                pass
+            if self.object:
+                # Return the PK of the newly-created object
+                data['pk'] = self.object.pk
+                data['text'] = str(self.object)
+
+                try:
+                    data['url'] = self.object.get_absolute_url()
+                except AttributeError:
+                    pass
 
         return self.renderJsonResponse(request, self.form, data)
 
@@ -323,6 +418,20 @@ class AjaxUpdateView(AjaxMixin, UpdateView):
         
         return self.renderJsonResponse(request, self.get_form(), context=self.get_context_data())
 
+    def save(self, object, form, **kwargs):
+        """
+        Method for updating the object in the database.
+        Default implementation is very simple, but can be overridden if required.
+
+        Args:
+            object - The current object, to be updated
+            form - The validated form
+        """
+
+        self.object = form.save()
+
+        return self.object
+
     def post(self, request, *args, **kwargs):
         """ Respond to POST request.
 
@@ -332,36 +441,47 @@ class AjaxUpdateView(AjaxMixin, UpdateView):
         - Otherwise, return sucess status
         """
 
+        self.request = request
+
         # Make sure we have an object to point to
         self.object = self.get_object()
 
         form = self.get_form()
 
+        # Perform initial form validation
+        form.is_valid()
+
+        # Perform custom validation
+        self.validate(self.object, form)
+
+        valid = form.is_valid()
+
         data = {
-            'form_valid': form.is_valid()
+            'form_valid': valid,
+            'form_errors': form.errors.as_json(),
+            'non_field_errors': form.non_field_errors().as_json(),
         }
 
-        if form.is_valid():
-            obj = form.save()
+        # Add in any extra class data
+        for value, key in enumerate(self.get_data()):
+            data[key] = value
+
+        if valid:
+
+            # Save the updated objec to the database
+            self.save(self.object, form)
+
+            self.object = self.get_object()
 
             # Include context data about the updated object
-            data['pk'] = obj.id
-
-            self.post_save(obj)
+            data['pk'] = self.object.pk
 
             try:
-                data['url'] = obj.get_absolute_url()
+                data['url'] = self.object.get_absolute_url()
             except AttributeError:
                 pass
 
         return self.renderJsonResponse(request, form, data)
-
-    def post_save(self, obj, *args, **kwargs):
-        """
-        Hook called after the form data is saved.
-        (Optional)
-        """
-        pass
 
 
 class AjaxDeleteView(AjaxMixin, UpdateView):
@@ -372,7 +492,7 @@ class AjaxDeleteView(AjaxMixin, UpdateView):
     """
 
     form_class = DeleteForm
-    ajax_form_title = "Delete Item"
+    ajax_form_title = _("Delete Item")
     ajax_template_name = "modal_delete_form.html"
     context_object_name = 'item'
 
@@ -421,7 +541,7 @@ class AjaxDeleteView(AjaxMixin, UpdateView):
         if confirmed:
             obj.delete()
         else:
-            form.errors['confirm_delete'] = ['Check box to confirm item deletion']
+            form.add_error('confirm_delete', _('Check box to confirm item deletion'))
             context[self.context_object_name] = self.get_object()
 
         data = {
@@ -436,7 +556,7 @@ class EditUserView(AjaxUpdateView):
     """ View for editing user information """
 
     ajax_template_name = "modal_form.html"
-    ajax_form_title = "Edit User Information"
+    ajax_form_title = _("Edit User Information")
     form_class = EditUserForm
 
     def get_object(self):
@@ -447,7 +567,7 @@ class SetPasswordView(AjaxUpdateView):
     """ View for setting user password """
 
     ajax_template_name = "InvenTree/password.html"
-    ajax_form_title = "Set Password"
+    ajax_form_title = _("Set Password")
     form_class = SetPasswordForm
 
     def get_object(self):
@@ -466,9 +586,9 @@ class SetPasswordView(AjaxUpdateView):
             # Passwords must match
 
             if not p1 == p2:
-                error = 'Password fields must match'
-                form.errors['enter_password'] = [error]
-                form.errors['confirm_password'] = [error]
+                error = _('Password fields must match')
+                form.add_error('enter_password', error)
+                form.add_error('confirm_password', error)
 
                 valid = False
 
@@ -632,11 +752,47 @@ class ColorThemeSelectView(FormView):
             return self.form_invalid(form)
 
 
+class SettingCategorySelectView(FormView):
+    """ View for selecting categories in settings """
+
+    form_class = SettingCategorySelectForm
+    success_url = reverse_lazy('settings-category')
+    template_name = "InvenTree/settings/category.html"
+
+    def get_initial(self):
+        """ Set category selection """
+
+        initial = super(SettingCategorySelectView, self).get_initial()
+
+        category = self.request.GET.get('category', None)
+        if category:
+            initial['category'] = category
+
+        return initial
+
+    def post(self, request, *args, **kwargs):
+        """ Handle POST request (which contains category selection).
+
+        Pass the selected category to the page template
+        """
+
+        form = self.get_form()
+
+        if form.is_valid():
+            context = self.get_context_data()
+
+            context['category'] = form.cleaned_data['category']
+
+            return super(SettingCategorySelectView, self).render_to_response(context)
+
+        return self.form_invalid(form)
+
+
 class DatabaseStatsView(AjaxView):
     """ View for displaying database statistics """
 
     ajax_template_name = "stats.html"
-    ajax_form_title = _("Database Statistics")
+    ajax_form_title = _("System Information")
 
     def get_context_data(self, **kwargs):
 

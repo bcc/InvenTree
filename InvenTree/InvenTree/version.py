@@ -7,12 +7,12 @@ import django
 
 import common.models
 
-INVENTREE_SW_VERSION = "0.1.3 pre"
+INVENTREE_SW_VERSION = "0.1.5 pre"
 
 
 def inventreeInstanceName():
     """ Returns the InstanceName settings for the current database """
-    return common.models.InvenTreeSetting.get_setting("InstanceName", "")
+    return common.models.InvenTreeSetting.get_setting("INVENTREE_INSTANCE", "")
 
 
 def inventreeVersion():

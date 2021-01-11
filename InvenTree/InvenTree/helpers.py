@@ -15,9 +15,20 @@ from django.http import StreamingHttpResponse
 from django.core.exceptions import ValidationError
 from django.utils.translation import ugettext as _
 
+from django.contrib.auth.models import Permission
+
 import InvenTree.version
 
+from common.models import InvenTreeSetting
 from .settings import MEDIA_URL, STATIC_URL
+
+
+def getSetting(key, backup_value=None):
+    """
+    Shortcut for reading a setting value from the database
+    """
+
+    return InvenTreeSetting.get_setting(key, backup_value=backup_value)
 
 
 def generateTestKey(test_name):
@@ -107,6 +118,19 @@ def str2bool(text, test=True):
         return str(text).lower() in ['1', 'y', 'yes', 't', 'true', 'ok', 'on', ]
     else:
         return str(text).lower() in ['0', 'n', 'no', 'none', 'f', 'false', 'off', ]
+
+
+def is_bool(text):
+    """
+    Determine if a string value 'looks' like a boolean.
+    """
+
+    if str2bool(text, True):
+        return True
+    elif str2bool(text, False):
+        return True
+    else:
+        return False
 
 
 def isNull(text):
@@ -313,7 +337,7 @@ def DownloadFile(data, filename, content_type='application/text'):
     return response
 
 
-def ExtractSerialNumbers(serials, expected_quantity):
+def extract_serial_numbers(serials, expected_quantity):
     """ Attempt to extract serial numbers from an input string.
     - Serial numbers must be integer values
     - Serial numbers must be positive
@@ -441,3 +465,21 @@ def validateFilterString(value):
         results[k] = v
 
     return results
+
+
+def addUserPermission(user, permission):
+    """
+    Shortcut function for adding a certain permission to a user.
+    """
+    
+    perm = Permission.objects.get(codename=permission)
+    user.user_permissions.add(perm)
+
+
+def addUserPermissions(user, permissions):
+    """
+    Shortcut function for adding multiple permissions to a user.
+    """
+
+    for permission in permissions:
+        addUserPermission(user, permission)

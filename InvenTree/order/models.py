@@ -4,8 +4,12 @@ Order model definitions
 
 # -*- coding: utf-8 -*-
 
+import os
+from datetime import datetime
+from decimal import Decimal
+
 from django.db import models, transaction
-from django.db.models import F, Sum
+from django.db.models import Q, F, Sum
 from django.db.models.functions import Coalesce
 from django.core.validators import MinValueValidator
 from django.core.exceptions import ValidationError
@@ -15,16 +19,14 @@ from django.utils.translation import ugettext as _
 
 from markdownx.models import MarkdownxField
 
-import os
-from datetime import datetime
-from decimal import Decimal
+from djmoney.models.fields import MoneyField
 
 from part import models as PartModels
 from stock import models as stock_models
 from company.models import Company, SupplierPart
 
 from InvenTree.fields import RoundingDecimalField
-from InvenTree.helpers import decimal2string, increment
+from InvenTree.helpers import decimal2string, increment, getSetting
 from InvenTree.status_codes import PurchaseOrderStatus, SalesOrderStatus, StockStatus
 from InvenTree.models import InvenTreeAttachment
 
@@ -46,8 +48,6 @@ class Order(models.Model):
         complete_date: Date the order was completed
 
     """
-
-    ORDER_PREFIX = ""
 
     @classmethod
     def getNextOrderNumber(cls):
@@ -86,16 +86,6 @@ class Order(models.Model):
 
         return new_ref
 
-    def __str__(self):
-        el = []
-
-        if self.ORDER_PREFIX:
-            el.append(self.ORDER_PREFIX)
-
-        el.append(self.reference)
-
-        return " ".join(el)
-
     def save(self, *args, **kwargs):
         if not self.creation_date:
             self.creation_date = datetime.now().date()
@@ -130,11 +120,50 @@ class PurchaseOrder(Order):
         supplier_reference: Optional field for supplier order reference code
         received_by: User that received the goods
     """
-    
-    ORDER_PREFIX = "PO"
+
+    @staticmethod
+    def filterByDate(queryset, min_date, max_date):
+        """
+        Filter by 'minimum and maximum date range'
+
+        - Specified as min_date, max_date
+        - Both must be specified for filter to be applied
+        - Determine which "interesting" orders exist bewteen these dates
+
+        To be "interesting":
+        - A "received" order where the received date lies within the date range
+        - TODO: A "pending" order where the target date lies within the date range
+        - TODO: An "overdue" order where the target date is in the past
+        """
+
+        date_fmt = '%Y-%m-%d'  # ISO format date string
+
+        # Ensure that both dates are valid
+        try:
+            min_date = datetime.strptime(str(min_date), date_fmt).date()
+            max_date = datetime.strptime(str(max_date), date_fmt).date()
+        except (ValueError, TypeError):
+            # Date processing error, return queryset unchanged
+            return queryset
+
+        # Construct a queryset for "received" orders within the range
+        received = Q(status=PurchaseOrderStatus.COMPLETE) & Q(complete_date__gte=min_date) & Q(complete_date__lte=max_date)
+
+        # TODO - Construct a queryset for "pending" orders within the range
+
+        # TODO - Construct a queryset for "overdue" orders within the range
+
+        flt = received
+
+        queryset = queryset.filter(flt)
+
+        return queryset
 
     def __str__(self):
-        return "PO {ref} - {company}".format(ref=self.reference, company=self.supplier.name)
+
+        prefix = getSetting('PURCHASEORDER_REFERENCE_PREFIX')
+
+        return f"{prefix}{self.reference} - {self.supplier.name}"
 
     status = models.PositiveIntegerField(default=PurchaseOrderStatus.PENDING, choices=PurchaseOrderStatus.items(),
                                          help_text=_('Purchase order status'))
@@ -209,6 +238,7 @@ class PurchaseOrder(Order):
 
         line.save()
 
+    @transaction.atomic
     def place_order(self):
         """ Marks the PurchaseOrder as PLACED. Order must be currently PENDING. """
 
@@ -217,6 +247,7 @@ class PurchaseOrder(Order):
             self.issue_date = datetime.now().date()
             self.save()
 
+    @transaction.atomic
     def complete_order(self):
         """ Marks the PurchaseOrder as COMPLETE. Order must be currently PLACED. """
 
@@ -225,10 +256,16 @@ class PurchaseOrder(Order):
             self.complete_date = datetime.now().date()
             self.save()
 
+    def can_cancel(self):
+        return self.status not in [
+            PurchaseOrderStatus.PLACED,
+            PurchaseOrderStatus.PENDING
+        ]
+
     def cancel_order(self):
         """ Marks the PurchaseOrder as CANCELLED. """
 
-        if self.status in [PurchaseOrderStatus.PLACED, PurchaseOrderStatus.PENDING]:
+        if self.can_cancel():
             self.status = PurchaseOrderStatus.CANCELLED
             self.save()
 
@@ -297,10 +334,53 @@ class SalesOrder(Order):
     Attributes:
         customer: Reference to the company receiving the goods in the order
         customer_reference: Optional field for customer order reference code
+        target_date: Target date for SalesOrder completion (optional)
     """
 
+    OVERDUE_FILTER = Q(status__in=SalesOrderStatus.OPEN) & ~Q(target_date=None) & Q(target_date__lte=datetime.now().date())
+
+    @staticmethod
+    def filterByDate(queryset, min_date, max_date):
+        """
+        Filter by "minimum and maximum date range"
+
+        - Specified as min_date, max_date
+        - Both must be specified for filter to be applied
+        - Determine which "interesting" orders exist between these dates
+
+        To be "interesting":
+        - A "completed" order where the completion date lies within the date range
+        - A "pending" order where the target date lies within the date range
+        - TODO: An "overdue" order where the target date is in the past
+        """
+
+        date_fmt = '%Y-%m-%d'  # ISO format date string
+
+        # Ensure that both dates are valid
+        try:
+            min_date = datetime.strptime(str(min_date), date_fmt).date()
+            max_date = datetime.strptime(str(max_date), date_fmt).date()
+        except (ValueError, TypeError):
+            # Date processing error, return queryset unchanged
+            return queryset
+ 
+        # Construct a queryset for "completed" orders within the range
+        completed = Q(status__in=SalesOrderStatus.COMPLETE) & Q(shipment_date__gte=min_date) & Q(shipment_date__lte=max_date)
+
+        # Construct a queryset for "pending" orders within the range
+        pending = Q(status__in=SalesOrderStatus.OPEN) & ~Q(target_date=None) & Q(target_date__gte=min_date) & Q(target_date__lte=max_date)
+
+        # TODO: Construct a queryset for "overdue" orders within the range
+
+        queryset = queryset.filter(completed | pending)
+
+        return queryset
+
     def __str__(self):
-        return "SO {ref} - {company}".format(ref=self.reference, company=self.customer.name)
+
+        prefix = getSetting('SALESORDER_REFERENCE_PREFIX')
+
+        return f"{prefix}{self.reference} - {self.customer.name}"
 
     def get_absolute_url(self):
         return reverse('so-detail', kwargs={'pk': self.id})
@@ -319,6 +399,12 @@ class SalesOrder(Order):
 
     customer_reference = models.CharField(max_length=64, blank=True, help_text=_("Customer order reference code"))
 
+    target_date = models.DateField(
+        null=True, blank=True,
+        verbose_name=_('Target completion date'),
+        help_text=_('Target date for order completion. Order will be overdue after this date.')
+    )
+
     shipment_date = models.DateField(blank=True, null=True)
 
     shipped_by = models.ForeignKey(
@@ -327,6 +413,23 @@ class SalesOrder(Order):
         blank=True, null=True,
         related_name='+'
     )
+
+    @property
+    def is_overdue(self):
+        """
+        Returns true if this SalesOrder is "overdue":
+
+        - Not completed
+        - Target date is "in the past"
+        """
+
+        # Order cannot be deemed overdue if target_date is not set
+        if self.target_date is None:
+            return False
+
+        today = datetime.now().date()
+
+        return self.is_pending and self.target_date < today
 
     @property
     def is_pending(self):
@@ -377,6 +480,16 @@ class SalesOrder(Order):
 
         return True
 
+    def can_cancel(self):
+        """
+        Return True if this order can be cancelled
+        """
+
+        if not self.status == SalesOrderStatus.PENDING:
+            return False
+
+        return True
+
     @transaction.atomic
     def cancel_order(self):
         """
@@ -386,7 +499,7 @@ class SalesOrder(Order):
         - Delete any StockItems which have been allocated
         """
 
-        if not self.status == SalesOrderStatus.PENDING:
+        if not self.can_cancel():
             return False
 
         self.status = SalesOrderStatus.CANCELLED
@@ -480,6 +593,15 @@ class PurchaseOrderLineItem(OrderLineItem):
     )
 
     received = models.DecimalField(decimal_places=5, max_digits=15, default=0, help_text=_('Number of items received'))
+
+    purchase_price = MoneyField(
+        max_digits=19,
+        decimal_places=4,
+        default_currency='USD',
+        null=True, blank=True,
+        verbose_name=_('Purchase Price'),
+        help_text=_('Unit purchase price'),
+    )
 
     def remaining(self):
         """ Calculate the number of items remaining to be received """
@@ -603,7 +725,6 @@ class SalesOrderAllocation(models.Model):
             'part__salable': True,
             'belongs_to': None,
             'sales_order': None,
-            'build_order': None,
         },
         help_text=_('Select stock item to allocate')
     )

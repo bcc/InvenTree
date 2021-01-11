@@ -1,15 +1,19 @@
 {% extends "part/part_base.html" %}
 {% load static %}
+{% load i18n %}
 {% block details %}
 
 {% include 'part/tabs.html' with tab='build' %}
 
-<h3>Part Builds</h3>
+<h4>{% trans "Part Builds" %}</h4>
+<hr>
 
 <div id='button-toolbar'>
     <div class='button-toolbar container-flui' style='float: right';>
         {% if part.active %}
-        <button class="btn btn-success" id='start-build'>Start New Build</button>
+        {% if roles.build.add %}
+        <button class="btn btn-success" id='start-build'><span class='fas fa-tools'></span> {% trans "Start New Build" %}</button>
+        {% endif %}
         {% endif %}
         <div class='filter-list' id='filter-list-build'>
             <!-- Empty div for filters -->
@@ -26,14 +30,11 @@
 {% block js_ready %}
 {{ block.super }}
     $("#start-build").click(function() {
-        launchModalForm(
-                        "{% url 'build-create' %}",
-                        {
-                            follow: true,
-                            data: {
-                                part: {{ part.id }}
-                            }
-                        });
+        newBuildOrder({
+            data: {
+                part: {{ part.id }},
+            }
+        });
     });
 
     loadBuildTable($("#build-table"), {

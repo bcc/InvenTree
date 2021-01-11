@@ -9,6 +9,9 @@ from rest_framework import serializers
 
 from sql_util.utils import SubqueryCount
 
+from django.db.models import Case, When, Value
+from django.db.models import BooleanField
+
 from InvenTree.serializers import InvenTreeModelSerializer
 from InvenTree.serializers import InvenTreeAttachmentSerializerField
 
@@ -95,6 +98,8 @@ class POLineItemSerializer(InvenTreeModelSerializer):
     part_detail = PartBriefSerializer(source='get_base_part', many=False, read_only=True)
     supplier_part_detail = SupplierPartSerializer(source='part', many=False, read_only=True)
     
+    purchase_price_string = serializers.CharField(source='purchase_price', read_only=True)
+
     class Meta:
         model = PurchaseOrderLineItem
 
@@ -108,6 +113,9 @@ class POLineItemSerializer(InvenTreeModelSerializer):
             'part_detail',
             'supplier_part_detail',
             'received',
+            'purchase_price',
+            'purchase_price_currency',
+            'purchase_price_string',
         ]
 
 
@@ -147,10 +155,22 @@ class SalesOrderSerializer(InvenTreeModelSerializer):
     def annotate_queryset(queryset):
         """
         Add extra information to the queryset
+
+        - Number of line items in the SalesOrder
+        - Overdue status of the SalesOrder
         """
 
         queryset = queryset.annotate(
             line_items=SubqueryCount('lines')
+        )
+
+        queryset = queryset.annotate(
+            overdue=Case(
+                When(
+                    SalesOrder.OVERDUE_FILTER, then=Value(True, output_field=BooleanField()),
+                ),
+                default=Value(False, output_field=BooleanField())
+            )
         )
 
         return queryset
@@ -161,24 +181,27 @@ class SalesOrderSerializer(InvenTreeModelSerializer):
 
     status_text = serializers.CharField(source='get_status_display', read_only=True)
 
+    overdue = serializers.BooleanField(required=False, read_only=True)
+
     class Meta:
         model = SalesOrder
 
         fields = [
             'pk',
-            'shipment_date',
             'creation_date',
-            'description',
-            'line_items',
-            'link',
-            'reference',
             'customer',
             'customer_detail',
             'customer_reference',
+            'description',
+            'line_items',
+            'link',
+            'notes',
+            'overdue',
+            'reference',
             'status',
             'status_text',
             'shipment_date',
-            'notes',
+            'target_date',
         ]
 
         read_only_fields = [

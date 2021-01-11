@@ -134,6 +134,37 @@ function reloadFieldOptions(fieldName, options) {
 }
 
 
+function enableField(fieldName, enabled, options={}) {
+    /* Enable (or disable) a particular field in a modal.
+     * 
+     * Args:
+     * - fieldName: The name of the field
+     * - enabled: boolean enabled / disabled status
+     * - options:
+     */
+
+    var modal = options.modal || '#modal-form';
+
+    var field = getFieldByName(modal, fieldName);
+
+    field.prop("disabled", !enabled);
+}
+
+function clearField(fieldName, options={}) {
+    
+    setFieldValue(fieldName, '', options);
+}
+
+function setFieldValue(fieldName, value, options={}) {
+
+    var modal = options.modal || '#modal-form';
+
+    var field = getFieldByName(modal, fieldName);
+
+    field.val(value);
+}
+
+
 function partialMatcher(params, data) {
     /* Replacement function for the 'matcher' parameter for a select2 dropdown.
 
@@ -354,7 +385,7 @@ function renderErrorMessage(xhr) {
     
     var html = '<b>' + xhr.statusText + '</b><br>';
     
-    html += '<b>Status Code - ' + xhr.status + '</b><br><hr>';
+    html += '<b>Error Code - ' + xhr.status + '</b><br><hr>';
     
     html += `
     <div class='panel-group'>
@@ -466,6 +497,9 @@ function openModal(options) {
      */
 
     var modal = options.modal || '#modal-form';
+
+    // Ensure that the 'warning' div is hidden
+    $(modal).find('#form-validation-warning').css('display', 'none');
 
     $(modal).on('shown.bs.modal', function() {
         $(modal + ' .modal-form-content').scrollTop(0);
@@ -693,6 +727,11 @@ function handleModalForm(url, options) {
                     }
                     // Form was returned, invalid!
                     else {
+
+                        var warningDiv = $(modal).find('#form-validation-warning');
+
+                        warningDiv.css('display', 'block');
+
                         if (response.html_form) {
                             injectModalForm(modal, response.html_form);
 
@@ -807,8 +846,46 @@ function launchModalForm(url, options = {}) {
             }
         },
         error: function (xhr, ajaxOptions, thrownError) {
+
             $(modal).modal('hide');
-            showAlertDialog('Error requesting form data', renderErrorMessage(xhr));
+
+            if (xhr.status == 0) {
+                // No response from the server
+                showAlertDialog(
+                    "No Response",
+                    "No response from the InvenTree server",
+                );
+            } else if (xhr.status == 400) {
+                showAlertDialog(
+                    "Error 400: Bad Request",
+                    "Server returned error code 400"
+                );
+            } else if (xhr.status == 401) {
+                showAlertDialog(
+                    "Error 401: Not Authenticated",
+                    "Authentication credentials not supplied"
+                );
+            } else if (xhr.status == 403) {
+                showAlertDialog(
+                    "Error 403: Permission Denied",
+                    "You do not have the required permissions to access this function"
+                );
+            } else if (xhr.status == 404) {
+                showAlertDialog(
+                    "Error 404: Resource Not Found",
+                    "The requested resource could not be located on the server"
+                );
+            } else if (xhr.status == 408) {
+                showAlertDialog(
+                    "Error 408: Timeout",
+                    "Connection timeout while requesting data from server"
+                );
+            } else {
+                showAlertDialog('Error requesting form data', renderErrorMessage(xhr));
+            }
+
+            console.log("Modal form error: " + xhr.status);
+            console.log("Message: " + xhr.responseText);
         }
     };
 

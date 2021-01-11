@@ -24,9 +24,14 @@ from markdownx.models import MarkdownxField
 
 from mptt.models import MPTTModel, TreeForeignKey
 
+from djmoney.models.fields import MoneyField
+
 from decimal import Decimal, InvalidOperation
-from datetime import datetime
+from datetime import datetime, timedelta
 from InvenTree import helpers
+
+import common.models
+import report.models
 
 from InvenTree.status_codes import StockStatus
 from InvenTree.models import InvenTreeTree, InvenTreeAttachment
@@ -123,6 +128,7 @@ class StockItem(MPTTModel):
         serial: Unique serial number for this StockItem
         link: Optional URL to link to external resource
         updated: Date that this stock item was last updated (auto)
+        expiry_date: Expiry date of the StockItem (optional)
         stocktake_date: Date of last stocktake for this item
         stocktake_user: User that performed the most recent stocktake
         review_needed: Flag if StockItem needs review
@@ -130,20 +136,25 @@ class StockItem(MPTTModel):
         status: Status of this StockItem (ref: InvenTree.status_codes.StockStatus)
         notes: Extra notes field
         build: Link to a Build (if this stock item was created from a build)
+        is_building: Boolean field indicating if this stock item is currently being built (or is "in production")
         purchase_order: Link to a PurchaseOrder (if this stock item was created from a PurchaseOrder)
         infinite: If True this StockItem can never be exhausted
         sales_order: Link to a SalesOrder object (if the StockItem has been assigned to a SalesOrder)
-        build_order: Link to a BuildOrder object (if the StockItem has been assigned to a BuildOrder)
+        purchase_price: The unit purchase price for this StockItem - this is the unit price at time of purchase (if this item was purchased from an external supplier)
     """
 
     # A Query filter which will be re-used in multiple places to determine if a StockItem is actually "in stock"
     IN_STOCK_FILTER = Q(
+        quantity__gt=0,
         sales_order=None,
-        build_order=None,
         belongs_to=None,
         customer=None,
+        is_building=False,
         status__in=StockStatus.AVAILABLE_CODES
     )
+
+    # A query filter which can be used to filter StockItem objects which have expired
+    EXPIRED_FILTER = IN_STOCK_FILTER & ~Q(expiry_date=None) & Q(expiry_date__lt=datetime.now().date())
 
     def save(self, *args, **kwargs):
         """
@@ -172,7 +183,7 @@ class StockItem(MPTTModel):
         if add_note:
             # This StockItem is being saved for the first time
             self.addTransactionNote(
-                'Created stock item',
+                _('Created stock item'),
                 user,
                 notes="Created new stock item for part '{p}'".format(p=str(self.part)),
                 system=True
@@ -206,7 +217,8 @@ class StockItem(MPTTModel):
         """
 
         super(StockItem, self).validate_unique(exclude)
-
+        
+        # If the serial number is set, make sure it is not a duplicate
         if self.serial is not None:
             # Query to look for duplicate serial numbers
             parts = PartModels.Part.objects.filter(tree_id=self.part.tree_id)
@@ -283,10 +295,24 @@ class StockItem(MPTTModel):
             # TODO - Find a test than can be perfomed...
             pass
 
+        # Ensure that the item cannot be assigned to itself
         if self.belongs_to and self.belongs_to.pk == self.pk:
             raise ValidationError({
                 'belongs_to': _('Item cannot belong to itself')
             })
+
+        # If the item is marked as "is_building", it must point to a build!
+        if self.is_building and not self.build:
+            raise ValidationError({
+                'build': _("Item must have a build reference if is_building=True")
+            })
+
+        # If the item points to a build, check that the Part references match
+        if self.build:
+            if not self.part == self.build.part:
+                raise ValidationError({
+                    'build': _("Build reference does not point to the same part object")
+                })
 
     def get_absolute_url(self):
         return reverse('stock-item-detail', kwargs={'pk': self.id})
@@ -351,7 +377,7 @@ class StockItem(MPTTModel):
         'self',
         verbose_name=_('Installed In'),
         on_delete=models.DO_NOTHING,
-        related_name='owned_parts', blank=True, null=True,
+        related_name='installed_parts', blank=True, null=True,
         help_text=_('Is this item installed in another item?')
     )
 
@@ -399,6 +425,10 @@ class StockItem(MPTTModel):
         related_name='build_outputs',
     )
 
+    is_building = models.BooleanField(
+        default=False,
+    )
+
     purchase_order = models.ForeignKey(
         'order.PurchaseOrder',
         on_delete=models.SET_NULL,
@@ -415,19 +445,19 @@ class StockItem(MPTTModel):
         related_name='stock_items',
         null=True, blank=True)
 
-    build_order = models.ForeignKey(
-        'build.Build',
-        on_delete=models.SET_NULL,
-        verbose_name=_("Destination Build Order"),
-        related_name='stock_items',
-        null=True, blank=True
+    expiry_date = models.DateField(
+        blank=True, null=True,
+        verbose_name=_('Expiry Date'),
+        help_text=_('Expiry date for stock item. Stock will be considered expired after this date'),
     )
 
-    # last time the stock was checked / counted
     stocktake_date = models.DateField(blank=True, null=True)
 
-    stocktake_user = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True,
-                                       related_name='stocktake_stock')
+    stocktake_user = models.ForeignKey(
+        User, on_delete=models.SET_NULL,
+        blank=True, null=True,
+        related_name='stocktake_stock'
+    )
 
     review_needed = models.BooleanField(default=False)
 
@@ -443,6 +473,65 @@ class StockItem(MPTTModel):
         verbose_name=_("Notes"),
         help_text=_('Stock Item Notes')
     )
+
+    purchase_price = MoneyField(
+        max_digits=19,
+        decimal_places=4,
+        default_currency='USD',
+        blank=True,
+        null=True,
+        verbose_name=_('Purchase Price'),
+        help_text=_('Single unit purchase price at time of purchase'),
+    )
+
+    def is_stale(self):
+        """
+        Returns True if this Stock item is "stale".
+
+        To be "stale", the following conditions must be met:
+
+        - Expiry date is not None
+        - Expiry date will "expire" within the configured stale date
+        - The StockItem is otherwise "in stock"
+        """
+
+        if self.expiry_date is None:
+            return False
+
+        if not self.in_stock:
+            return False
+
+        today = datetime.now().date()
+
+        stale_days = common.models.InvenTreeSetting.get_setting('STOCK_STALE_DAYS')
+
+        if stale_days <= 0:
+            return False
+
+        expiry_date = today + timedelta(days=stale_days)
+
+        return self.expiry_date < expiry_date
+
+    def is_expired(self):
+        """
+        Returns True if this StockItem is "expired".
+
+        To be "expired", the following conditions must be met:
+
+        - Expiry date is not None
+        - Expiry date is "in the past"
+        - The StockItem is otherwise "in stock"
+        """
+
+        if self.expiry_date is None:
+            return False
+
+        if not self.in_stock:
+            return False
+
+        today = datetime.now().date()
+
+        return self.expiry_date < today
 
     def clearAllocations(self):
         """
@@ -590,10 +679,106 @@ class StockItem(MPTTModel):
         if self.sales_order is not None:
             return False
 
-        if self.build_order is not None:
+        return True
+
+    def installedItemCount(self):
+        """
+        Return the number of stock items installed inside this one.
+        """
+
+        return self.installed_parts.count()
+
+    def hasInstalledItems(self):
+        """
+        Returns true if this stock item has other stock items installed in it.
+        """
+
+        return self.installedItemCount() > 0
+
+    @transaction.atomic
+    def installStockItem(self, other_item, quantity, user, notes):
+        """
+        Install another stock item into this stock item.
+
+        Args
+            other_item: The stock item to install into this stock item
+            quantity: The quantity of stock to install
+            user: The user performing the operation
+            notes: Any notes associated with the operation
+        """
+
+        # Cannot be already installed in another stock item!
+        if self.belongs_to is not None:
             return False
 
-        return True
+        # If the quantity is less than the stock item, split the stock!
+        stock_item = other_item.splitStock(quantity, None, user)
+
+        if stock_item is None:
+            stock_item = other_item
+
+        # Assign the other stock item into this one
+        stock_item.belongs_to = self
+        stock_item.save()
+
+        # Add a transaction note to the other item
+        stock_item.addTransactionNote(
+            _('Installed into stock item') + ' ' + str(self.pk),
+            user,
+            notes=notes,
+            url=self.get_absolute_url()
+        )
+
+        # Add a transaction note to this item
+        self.addTransactionNote(
+            _('Installed stock item') + ' ' + str(stock_item.pk),
+            user, notes=notes,
+            url=stock_item.get_absolute_url()
+        )
+
+    @transaction.atomic
+    def uninstallIntoLocation(self, location, user, notes):
+        """
+        Uninstall this stock item from another item, into a location.
+
+        Args:
+            location: The stock location where the item will be moved
+            user: The user performing the operation
+            notes: Any notes associated with the operation
+        """
+
+        # If the stock item is not installed in anything, ignore
+        if self.belongs_to is None:
+            return False
+
+        # TODO - Are there any other checks that need to be performed at this stage?
+
+        # Add a transaction note to the parent item
+        self.belongs_to.addTransactionNote(
+            _("Uninstalled stock item") + ' ' + str(self.pk),
+            user,
+            notes=notes,
+            url=self.get_absolute_url(),
+        )
+
+        # Mark this stock item as *not* belonging to anyone
+        self.belongs_to = None
+        self.location = location
+
+        self.save()
+
+        if location:
+            url = location.get_absolute_url()
+        else:
+            url = ''
+
+        # Add a transaction note!
+        self.addTransactionNote(
+            _('Uninstalled into location') + ' ' + str(location),
+            user,
+            notes=notes,
+            url=url
+        )
 
     @property
     def children(self):
@@ -609,28 +794,17 @@ class StockItem(MPTTModel):
 
     @property
     def in_stock(self):
+        """
+        Returns True if this item is in stock.
 
-        # Not 'in stock' if it has been installed inside another StockItem
-        if self.belongs_to is not None:
-            return False
-            
-        # Not 'in stock' if it has been sent to a customer
-        if self.sales_order is not None:
-            return False
+        See also: IN_STOCK_FILTER
+        """
 
-        # Not 'in stock' if it has been allocated to a BuildOrder
-        if self.build_order is not None:
-            return False
+        query = StockItem.objects.filter(pk=self.pk)
 
-        # Not 'in stock' if it has been assigned to a customer
-        if self.customer is not None:
-            return False
+        query = query.filter(StockItem.IN_STOCK_FILTER)
 
-        # Not 'in stock' if the status code makes it unavailable
-        if self.status in StockStatus.UNAVAILABLE_CODES:
-            return False
-
-        return True
+        return query.exists()
 
     @property
     def tracking_info_count(self):
@@ -701,14 +875,11 @@ class StockItem(MPTTModel):
             raise ValidationError({"quantity": _("Quantity does not match serial numbers")})
 
         # Test if each of the serial numbers are valid
-        existing = []
-
-        for serial in serials:
-            if self.part.checkIfSerialNumberExists(serial):
-                existing.append(serial)
+        existing = self.part.find_conflicting_serial_numbers(serials)
 
         if len(existing) > 0:
-            raise ValidationError({"serial_numbers": _("Serial numbers already exist: ") + str(existing)})
+            exists = ','.join([str(x) for x in existing])
+            raise ValidationError({"serial_numbers": _("Serial numbers already exist") + ': ' + exists})
 
         # Create a new stock item for each unique serial number
         for serial in serials:
@@ -776,20 +947,20 @@ class StockItem(MPTTModel):
 
         # Do not split a serialized part
         if self.serialized:
-            return
+            return self
 
         try:
             quantity = Decimal(quantity)
         except (InvalidOperation, ValueError):
-            return
+            return self
 
         # Doesn't make sense for a zero quantity
         if quantity <= 0:
-            return
+            return self
 
         # Also doesn't make sense to split the full amount
         if quantity >= self.quantity:
-            return
+            return self
 
         # Create a new StockItem object, duplicating relevant fields
         # Nullify the PK so a new record is created
@@ -939,7 +1110,7 @@ class StockItem(MPTTModel):
 
         if self.updateQuantity(count):
 
-            self.addTransactionNote('Stocktake - counted {n} items'.format(n=count),
+            self.addTransactionNote('Stocktake - counted {n} items'.format(n=helpers.normalize(count)),
                                     user,
                                     notes=notes,
                                     system=True)
@@ -968,7 +1139,7 @@ class StockItem(MPTTModel):
 
         if self.updateQuantity(self.quantity + quantity):
             
-            self.addTransactionNote('Added {n} items to stock'.format(n=quantity),
+            self.addTransactionNote('Added {n} items to stock'.format(n=helpers.normalize(quantity)),
                                     user,
                                     notes=notes,
                                     system=True)
@@ -994,7 +1165,7 @@ class StockItem(MPTTModel):
 
         if self.updateQuantity(self.quantity - quantity):
 
-            self.addTransactionNote('Removed {n} items from stock'.format(n=quantity),
+            self.addTransactionNote('Removed {n} items from stock'.format(n=helpers.normalize(quantity)),
                                     user,
                                     notes=notes,
                                     system=True)
@@ -1015,6 +1186,22 @@ class StockItem(MPTTModel):
             s += ' @ {loc}'.format(loc=self.location.name)
 
         return s
+
+    @transaction.atomic
+    def clear_test_results(self, **kwargs):
+        """
+        Remove all test results
+
+        kwargs:
+            TODO
+        """
+
+        # All test results
+        results = self.test_results.all()
+
+        # TODO - Perhaps some filtering options supplied by kwargs?
+
+        results.delete()
 
     def getTestResults(self, test=None, result=None, user=None):
         """
@@ -1052,7 +1239,9 @@ class StockItem(MPTTModel):
         as all named tests are accessible.
         """
 
-        results = self.getTestResults(**kwargs).order_by('-date')
+        # Filter results by "date", so that newer results
+        # will override older ones.
+        results = self.getTestResults(**kwargs).order_by('date')
 
         result_map = {}
 
@@ -1108,16 +1297,60 @@ class StockItem(MPTTModel):
 
     @property
     def required_test_count(self):
+        """
+        Return the number of 'required tests' for this StockItem
+        """
         return self.part.getRequiredTests().count()
 
     def hasRequiredTests(self):
+        """
+        Return True if there are any 'required tests' associated with this StockItem
+        """
         return self.part.getRequiredTests().count() > 0
 
     def passedAllRequiredTests(self):
+        """
+        Returns True if this StockItem has passed all required tests
+        """
 
         status = self.requiredTestStatus()
 
         return status['passed'] >= status['total']
+
+    def available_test_reports(self):
+        """
+        Return a list of TestReport objects which match this StockItem.
+        """
+
+        reports = []
+
+        item_query = StockItem.objects.filter(pk=self.pk)
+
+        for test_report in report.models.TestReport.objects.filter(enabled=True):
+
+            filters = helpers.validateFilterString(test_report.filters)
+
+            if item_query.filter(**filters).exists():
+                reports.append(test_report)
+
+        return reports
+
+    @property
+    def has_test_reports(self):
+        """
+        Return True if there are test reports available for this stock item
+        """
+
+        return len(self.available_test_reports()) > 0
+
+    @property
+    def has_labels(self):
+        """
+        Return True if there are any label templates available for this stock item
+        """
+
+        # TODO - Implement this
+        return True
 
 
 @receiver(pre_delete, sender=StockItem, dispatch_uid='stock_item_pre_delete_log')

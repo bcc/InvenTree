@@ -8,6 +8,7 @@
     category: 8
     link: www.acme.com/parts/m2x4lphs
     tree_id: 0
+    purchaseable: True
     level: 0
     lft: 0
     rght: 0
@@ -67,11 +68,13 @@
     name: 'Widget'
     description: 'A watchamacallit'
     category: 7
+    assembly: true
     trackable: true
     tree_id: 0
     level: 0
     lft: 0
     rght: 0
+    default_expiry: 10
 
 - model: part.part
   pk: 50
@@ -132,6 +135,7 @@
   fields:
     name: 'Red chair'
     variant_of: 10000
+    IPN: "R.CH"
     trackable: true
     category: 7
     tree_id: 1

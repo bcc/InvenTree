@@ -24,8 +24,8 @@ class BarcodeAPITest(APITestCase):
 
     def setUp(self):
         # Create a user for auth
-        User = get_user_model()
-        User.objects.create_user('testuser', 'test@testing.com', 'password')
+        user = get_user_model()
+        user.objects.create_user('testuser', 'test@testing.com', 'password')
 
         self.client.login(username='testuser', password='password')
 
@@ -45,6 +45,34 @@ class BarcodeAPITest(APITestCase):
     def test_empty(self):
 
         response = self.postBarcode(self.scan_url, '')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        data = response.data
+        self.assertIn('error', data)
+
+        self.assertIn('barcode_data', data)
+        self.assertIn('hash', data)
+        self.assertIn('plugin', data)
+        self.assertIsNone(data['plugin'])
+
+    def test_integer_barcode(self):
+
+        response = self.postBarcode(self.scan_url, '123456789')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        data = response.data
+        self.assertIn('error', data)
+
+        self.assertIn('barcode_data', data)
+        self.assertIn('hash', data)
+        self.assertIn('plugin', data)
+        self.assertIsNone(data['plugin'])
+
+    def test_array_barcode(self):
+
+        response = self.postBarcode(self.scan_url, "['foo', 'bar']")
 
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 

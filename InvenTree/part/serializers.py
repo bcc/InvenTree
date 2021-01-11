@@ -2,30 +2,20 @@
 JSON serializers for Part app
 """
 import imghdr
-
-from rest_framework import serializers
-
-from .models import Part, PartStar
-
-from .models import PartCategory
-from .models import BomItem
-from .models import PartParameter, PartParameterTemplate
-from .models import PartAttachment
-from .models import PartTestTemplate
-from .models import PartSellPriceBreak
-
-from stock.models import StockItem
-
 from decimal import Decimal
-
-from sql_util.utils import SubquerySum, SubqueryCount
 
 from django.db.models import Q
 from django.db.models.functions import Coalesce
+from InvenTree.serializers import (InvenTreeAttachmentSerializerField,
+                                   InvenTreeModelSerializer)
+from InvenTree.status_codes import BuildStatus, PurchaseOrderStatus
+from rest_framework import serializers
+from sql_util.utils import SubqueryCount, SubquerySum
+from stock.models import StockItem
 
-from InvenTree.status_codes import PurchaseOrderStatus, BuildStatus
-from InvenTree.serializers import InvenTreeModelSerializer
-from InvenTree.serializers import InvenTreeAttachmentSerializerField
+from .models import (BomItem, Part, PartAttachment, PartCategory,
+                     PartParameter, PartParameterTemplate, PartSellPriceBreak,
+                     PartStar, PartTestTemplate, PartCategoryParameterTemplate)
 
 
 class CategorySerializer(InvenTreeModelSerializer):
@@ -41,6 +31,7 @@ class CategorySerializer(InvenTreeModelSerializer):
             'pk',
             'name',
             'description',
+            'default_location',
             'pathstring',
             'url',
             'parent',
@@ -93,13 +84,9 @@ class PartSalePriceSerializer(InvenTreeModelSerializer):
     Serializer for sale prices for Part model.
     """
 
-    symbol = serializers.CharField(read_only=True)
-
-    suffix = serializers.CharField(read_only=True)
-
     quantity = serializers.FloatField()
 
-    cost = serializers.FloatField()
+    price = serializers.CharField()
 
     class Meta:
         model = PartSellPriceBreak
@@ -107,10 +94,7 @@ class PartSalePriceSerializer(InvenTreeModelSerializer):
             'pk',
             'part',
             'quantity',
-            'cost',
-            'currency',
-            'symbol',
-            'suffix',
+            'price',
         ]
 
 
@@ -304,6 +288,8 @@ class PartSerializer(InvenTreeModelSerializer):
             'category_detail',
             'component',
             'description',
+            'default_location',
+            'default_expiry',
             'full_name',
             'image',
             'in_stock',
@@ -351,7 +337,7 @@ class PartStarSerializer(InvenTreeModelSerializer):
 class BomItemSerializer(InvenTreeModelSerializer):
     """ Serializer for BomItem object """
 
-    price_range = serializers.CharField(read_only=True)
+    # price_range = serializers.CharField(read_only=True)
 
     quantity = serializers.FloatField()
 
@@ -402,7 +388,8 @@ class BomItemSerializer(InvenTreeModelSerializer):
             'sub_part_detail',
             'quantity',
             'reference',
-            'price_range',
+            # 'price_range',
+            'optional',
             'overage',
             'note',
             'validated',
@@ -431,4 +418,20 @@ class PartParameterTemplateSerializer(InvenTreeModelSerializer):
             'pk',
             'name',
             'units',
+        ]
+
+
+class CategoryParameterTemplateSerializer(InvenTreeModelSerializer):
+    """ Serializer for PartCategoryParameterTemplate """
+
+    parameter_template = PartParameterTemplateSerializer(many=False,
+                                                         read_only=True)
+
+    class Meta:
+        model = PartCategoryParameterTemplate
+        fields = [
+            'pk',
+            'category',
+            'parameter_template',
+            'default_value',
         ]

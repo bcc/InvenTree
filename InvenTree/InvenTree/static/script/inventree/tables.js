@@ -109,10 +109,20 @@ $.fn.inventreeTable = function(options) {
     options.pagination = true;
     options.pageSize = inventreeLoad(varName, 25);
     options.pageList = [25, 50, 100, 250, 'all'];
+
     options.rememberOrder = true;
-    options.sortable = true;
-    options.search = true;
-    options.showColumns = true;
+
+    if (options.sortable == null) {
+        options.sortable = true;
+    }
+
+    if (options.search == null) {
+        options.search = true;
+    }
+
+    if (options.showColumns == null) {
+        options.showColumns = true;
+    }
 
     // Callback to save pagination data
     options.onPageChange = function(number, size) {
@@ -157,6 +167,11 @@ $.fn.inventreeTable = function(options) {
             console.log('Could not get list of visible columns!');
         }
     }
+
+    // Optionally, link buttons to the table selection
+    if (options.buttons) {
+        linkButtonsToSelection(table, options.buttons);
+    }
 }
 
 function customGroupSorter(sortName, sortOrder, sortData) {
@@ -166,8 +181,15 @@ function customGroupSorter(sortName, sortOrder, sortData) {
     sortData.sort(function(a, b) {
 
         // Extract default field values
-        var aa = a[sortName];
-        var bb = b[sortName];
+        // Allow multi-level access if required
+        // Ref: https://stackoverflow.com/a/6394168
+
+        function extract(obj, i) {
+            return obj[i];
+        }
+
+        var aa = sortName.split('.').reduce(extract, a);
+        var bb = sortName.split('.').reduce(extract, b);
 
         // Extract parent information
         var aparent = a._data && a._data['parent-index'];

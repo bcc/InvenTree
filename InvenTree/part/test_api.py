@@ -3,6 +3,7 @@ from rest_framework import status
 
 from django.urls import reverse
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 
 from part.models import Part
 from stock.models import StockItem
@@ -28,8 +29,28 @@ class PartAPITest(APITestCase):
 
     def setUp(self):
         # Create a user for auth
-        User = get_user_model()
-        User.objects.create_user('testuser', 'test@testing.com', 'password')
+        user = get_user_model()
+        
+        self.user = user.objects.create_user(
+            username='testuser',
+            email='test@testing.com',
+            password='password'
+        )
+
+        # Put the user into a group with the correct permissions
+        group = Group.objects.create(name='mygroup')
+        self.user.groups.add(group)
+
+        # Give the group *all* the permissions!
+        for rule in group.rule_sets.all():
+            rule.can_view = True
+            rule.can_change = True
+            rule.can_add = True
+            rule.can_delete = True
+
+            rule.save()
+
+        group.save()
 
         self.client.login(username='testuser', password='password')
 
@@ -221,6 +242,17 @@ class PartAPITest(APITestCase):
 
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_get_thumbs(self):
+        """
+        Return list of part thumbnails
+        """
+
+        url = reverse('api-part-thumbs')
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
 
 class PartAPIAggregationTest(APITestCase):
     """
@@ -238,8 +270,9 @@ class PartAPIAggregationTest(APITestCase):
 
     def setUp(self):
         # Create a user for auth
-        User = get_user_model()
-        User.objects.create_user('testuser', 'test@testing.com', 'password')
+        user = get_user_model()
+        
+        user.objects.create_user('testuser', 'test@testing.com', 'password')
 
         self.client.login(username='testuser', password='password')
 

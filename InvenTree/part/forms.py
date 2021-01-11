@@ -13,14 +13,18 @@ from mptt.fields import TreeNodeChoiceField
 from django import forms
 from django.utils.translation import ugettext as _
 
-from .models import Part, PartCategory, PartAttachment
+from .models import Part, PartCategory, PartAttachment, PartRelated
 from .models import BomItem
 from .models import PartParameterTemplate, PartParameter
+from .models import PartCategoryParameterTemplate
 from .models import PartTestTemplate
 from .models import PartSellPriceBreak
 
 
-from common.models import Currency
+class PartModelChoiceField(forms.ModelChoiceField):
+    """ Extending string representation of Part instance with available stock """
+    def label_from_instance(self, part):
+        return f'{part} - {part.available_stock}'
 
 
 class PartImageForm(HelperForm):
@@ -77,6 +81,38 @@ class BomExportForm(forms.Form):
         self.fields['file_format'].choices = self.get_choices()
 
 
+class BomDuplicateForm(HelperForm):
+    """
+    Simple confirmation form for BOM duplication.
+
+    Select which parent to select from.
+    """
+
+    parent = PartModelChoiceField(
+        label=_('Parent Part'),
+        help_text=_('Select parent part to copy BOM from'),
+        queryset=Part.objects.filter(is_template=True),
+    )
+
+    clear = forms.BooleanField(
+        required=False, initial=True,
+        help_text=_('Clear existing BOM items')
+    )
+
+    confirm = forms.BooleanField(
+        required=False, initial=False,
+        help_text=_('Confirm BOM duplication')
+    )
+
+    class Meta:
+        model = Part
+        fields = [
+            'parent',
+            'clear',
+            'confirm',
+        ]
+
+
 class BomValidateForm(HelperForm):
     """ Simple confirmation form for BOM validation.
     User is presented with a single checkbox input,
@@ -104,6 +140,20 @@ class BomUploadSelectFile(HelperForm):
         ]
 
 
+class CreatePartRelatedForm(HelperForm):
+    """ Form for creating a PartRelated object """
+
+    class Meta:
+        model = PartRelated
+        fields = [
+            'part_1',
+            'part_2',
+        ]
+        labels = {
+            'part_2': _('Related Part'),
+        }
+
+
 class EditPartAttachmentForm(HelperForm):
     """ Form for editing a PartAttachment object """
 
@@ -123,12 +173,15 @@ class SetPartCategoryForm(forms.Form):
 
 
 class EditPartForm(HelperForm):
-    """ Form for editing a Part object """
+    """
+    Form for editing a Part object.
+    """
 
     field_prefix = {
         'keywords': 'fa-key',
         'link': 'fa-link',
         'IPN': 'fa-hashtag',
+        'default_expiry': 'fa-stopwatch',
     }
 
     bom_copy = forms.BooleanField(required=False,
@@ -148,24 +201,44 @@ class EditPartForm(HelperForm):
                                           help_text=_('Confirm part creation'),
                                           widget=forms.HiddenInput())
 
+    selected_category_templates = forms.BooleanField(required=False,
+                                                     initial=False,
+                                                     label=_('Include category parameter templates'),
+                                                     widget=forms.HiddenInput())
+
+    parent_category_templates = forms.BooleanField(required=False,
+                                                   initial=False,
+                                                   label=_('Include parent categories parameter templates'),
+                                                   widget=forms.HiddenInput())
+
     class Meta:
         model = Part
         fields = [
-            'bom_copy',
-            'parameters_copy',
             'confirm_creation',
             'category',
+            'selected_category_templates',
+            'parent_category_templates',
             'name',
             'IPN',
             'description',
             'revision',
+            'bom_copy',
+            'parameters_copy',
             'keywords',
             'variant_of',
             'link',
             'default_location',
             'default_supplier',
+            'default_expiry',
             'units',
             'minimum_stock',
+            'component',
+            'assembly',
+            'is_template',
+            'trackable',
+            'purchaseable',
+            'salable',
+            'virtual',
         ]
 
 
@@ -210,10 +283,26 @@ class EditCategoryForm(HelperForm):
         ]
 
 
-class PartModelChoiceField(forms.ModelChoiceField):
-    """ Extending string representation of Part instance with available stock """
-    def label_from_instance(self, part):
-        return f'{part} - {part.available_stock}'
+class EditCategoryParameterTemplateForm(HelperForm):
+    """ Form for editing a PartCategoryParameterTemplate object """
+
+    add_to_same_level_categories = forms.BooleanField(required=False,
+                                                      initial=False,
+                                                      help_text=_('Add parameter template to same level categories'))
+
+    add_to_all_categories = forms.BooleanField(required=False,
+                                               initial=False,
+                                               help_text=_('Add parameter template to all categories'))
+    
+    class Meta:
+        model = PartCategoryParameterTemplate
+        fields = [
+            'category',
+            'parameter_template',
+            'default_value',
+            'add_to_same_level_categories',
+            'add_to_all_categories',
+        ]
 
 
 class EditBomItemForm(HelperForm):
@@ -231,11 +320,14 @@ class EditBomItemForm(HelperForm):
             'quantity',
             'reference',
             'overage',
-            'note'
+            'note',
+            'optional',
         ]
 
         # Prevent editing of the part associated with this BomItem
-        widgets = {'part': forms.HiddenInput()}
+        widgets = {
+            'part': forms.HiddenInput()
+        }
 
 
 class PartPriceForm(forms.Form):
@@ -247,13 +339,10 @@ class PartPriceForm(forms.Form):
         help_text=_('Input quantity for price calculation')
     )
 
-    currency = forms.ModelChoiceField(queryset=Currency.objects.all(), label='Currency', help_text=_('Select currency for price calculation'))
-
     class Meta:
         model = Part
         fields = [
             'quantity',
-            'currency',
         ]
 
 
@@ -264,13 +353,10 @@ class EditPartSalePriceBreakForm(HelperForm):
 
     quantity = RoundingDecimalFormField(max_digits=10, decimal_places=5)
 
-    cost = RoundingDecimalFormField(max_digits=10, decimal_places=5)
-
     class Meta:
         model = PartSellPriceBreak
         fields = [
             'part',
             'quantity',
-            'cost',
-            'currency',
+            'price',
         ]

@@ -23,6 +23,9 @@ from part.serializers import PartBriefSerializer
 from company.models import SupplierPart
 from company.serializers import SupplierPartSerializer
 
+import common.settings
+import common.models
+
 from .serializers import StockItemSerializer
 from .serializers import LocationSerializer, LocationBriefSerializer
 from .serializers import StockTrackingSerializer
@@ -34,6 +37,8 @@ from InvenTree.helpers import str2bool, isNull
 from InvenTree.api import AttachmentMixin
 
 from decimal import Decimal, InvalidOperation
+
+from datetime import datetime, timedelta
 
 from rest_framework.serializers import ValidationError
 from rest_framework.views import APIView
@@ -52,6 +57,10 @@ class StockCategoryTree(TreeSerializer):
     def get_items(self):
         return StockLocation.objects.all().prefetch_related('stock_items', 'children')
 
+    permission_classes = [
+        permissions.IsAuthenticated,
+    ]
+
 
 class StockDetail(generics.RetrieveUpdateDestroyAPIView):
     """ API detail endpoint for Stock object
@@ -68,7 +77,6 @@ class StockDetail(generics.RetrieveUpdateDestroyAPIView):
 
     queryset = StockItem.objects.all()
     serializer_class = StockItemSerializer
-    permission_classes = (permissions.IsAuthenticated,)
 
     def get_queryset(self, *args, **kwargs):
 
@@ -289,10 +297,6 @@ class StockLocationList(generics.ListCreateAPIView):
             
         return queryset
 
-    permission_classes = [
-        permissions.IsAuthenticated,
-    ]
-
     filter_backends = [
         DjangoFilterBackend,
         filters.SearchFilter,
@@ -325,8 +329,39 @@ class StockList(generics.ListCreateAPIView):
     serializer_class = StockItemSerializer
     queryset = StockItem.objects.all()
 
-    # TODO - Override the 'create' method for this view,
-    # to allow the user to be recorded when a new StockItem object is created
+    def create(self, request, *args, **kwargs):
+        """
+        Create a new StockItem object via the API.
+
+        We override the default 'create' implementation.
+
+        If a location is *not* specified, but the linked *part* has a default location,
+        we can pre-fill the location automatically.
+        """
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        item = serializer.save()
+
+        # A location was *not* specified - try to infer it
+        if 'location' not in request.data:
+            location = item.part.get_default_location()
+            
+            if location is not None:
+                item.location = location
+                item.save()
+
+        # An expiry date was *not* specified - try to infer it!
+        if 'expiry_date' not in request.data:
+            
+            if item.part.default_expiry > 0:
+                item.expiry_date = datetime.now().date() + timedelta(days=item.part.default_expiry)
+                item.save()
+
+        # Return a response
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def list(self, request, *args, **kwargs):
         """
@@ -455,20 +490,85 @@ class StockList(generics.ListCreateAPIView):
         if belongs_to:
             queryset = queryset.filter(belongs_to=belongs_to)
 
+        # Filter by batch code
+        batch = params.get('batch', None)
+
+        if batch is not None:
+            queryset = queryset.filter(batch=batch)
+
         build = params.get('build', None)
 
         if build:
             queryset = queryset.filter(build=build)
 
-        build_order = params.get('build_order', None)
+        # Filter by 'is building' status
+        is_building = params.get('is_building', None)
 
-        if build_order:
-            queryset = queryset.filter(build_order=build_order)
+        if is_building:
+            is_building = str2bool(is_building)
+            queryset = queryset.filter(is_building=is_building)
 
         sales_order = params.get('sales_order', None)
 
         if sales_order:
             queryset = queryset.filter(sales_order=sales_order)
+
+        purchase_order = params.get('purchase_order', None)
+
+        if purchase_order is not None:
+            queryset = queryset.filter(purchase_order=purchase_order)
+
+        # Filter stock items which are installed in another (specific) stock item
+        installed_in = params.get('installed_in', None)
+
+        if installed_in:
+            # Note: The "installed_in" field is called "belongs_to"
+            queryset = queryset.filter(belongs_to=installed_in)
+
+        # Filter stock items which are installed in another stock item
+        installed = params.get('installed', None)
+
+        if installed is not None:
+            installed = str2bool(installed)
+
+            if installed:
+                # Exclude items which are *not* installed in another item
+                queryset = queryset.exclude(belongs_to=None)
+            else:
+                # Exclude items which are instaled in another item
+                queryset = queryset.filter(belongs_to=None)
+
+        if common.settings.stock_expiry_enabled():
+
+            # Filter by 'expired' status
+            expired = params.get('expired', None)
+
+            if expired is not None:
+                expired = str2bool(expired)
+
+                if expired:
+                    queryset = queryset.filter(StockItem.EXPIRED_FILTER)
+                else:
+                    queryset = queryset.exclude(StockItem.EXPIRED_FILTER)
+
+            # Filter by 'stale' status
+            stale = params.get('stale', None)
+
+            if stale is not None:
+                stale = str2bool(stale)
+
+                # How many days to account for "staleness"?
+                stale_days = common.models.InvenTreeSetting.get_setting('STOCK_STALE_DAYS')
+
+                if stale_days > 0:
+                    stale_date = datetime.now().date() + timedelta(days=stale_days)
+                    
+                    stale_filter = StockItem.IN_STOCK_FILTER & ~Q(expiry_date=None) & Q(expiry_date__lt=stale_date)
+
+                    if stale:
+                        queryset = queryset.filter(stale_filter)
+                    else:
+                        queryset = queryset.exclude(stale_filter)
 
         # Filter by customer
         customer = params.get('customer', None)
@@ -562,10 +662,10 @@ class StockList(generics.ListCreateAPIView):
                 queryset = queryset.exclude(quantity__lte=0)
 
         # Filter by internal part number
-        IPN = params.get('IPN', None)
+        ipn = params.get('IPN', None)
 
-        if IPN is not None:
-            queryset = queryset.filter(part__IPN=IPN)
+        if ipn is not None:
+            queryset = queryset.filter(part__IPN=ipn)
 
         # Does the client wish to filter by the Part ID?
         part_id = params.get('part', None)
@@ -669,10 +769,6 @@ class StockList(generics.ListCreateAPIView):
 
         return queryset
 
-    permission_classes = [
-        permissions.IsAuthenticated,
-    ]
-
     filter_backends = [
         DjangoFilterBackend,
         filters.SearchFilter,
@@ -717,10 +813,6 @@ class StockItemTestResultList(generics.ListCreateAPIView):
 
     queryset = StockItemTestResult.objects.all()
     serializer_class = StockItemTestResultSerializer
-
-    permission_classes = [
-        permissions.IsAuthenticated,
-    ]
 
     filter_backends = [
         DjangoFilterBackend,
@@ -773,7 +865,6 @@ class StockTrackingList(generics.ListCreateAPIView):
 
     queryset = StockItemTracking.objects.all()
     serializer_class = StockTrackingSerializer
-    permission_classes = [permissions.IsAuthenticated]
 
     def get_serializer(self, *args, **kwargs):
         try:
@@ -845,7 +936,6 @@ class LocationDetail(generics.RetrieveUpdateDestroyAPIView):
 
     queryset = StockLocation.objects.all()
     serializer_class = LocationSerializer
-    permission_classes = (permissions.IsAuthenticated,)
 
 
 stock_endpoints = [

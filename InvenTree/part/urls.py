@@ -12,6 +12,11 @@ from django.conf.urls import url, include
 
 from . import views
 
+part_related_urls = [
+    url(r'^new/?', views.PartRelatedCreate.as_view(), name='part-related-create'),
+    url(r'^(?P<pk>\d+)/delete/?', views.PartRelatedDelete.as_view(), name='part-related-delete'),
+]
+
 part_attachment_urls = [
     url(r'^new/?', views.PartAttachmentCreate.as_view(), name='part-attachment-create'),
     url(r'^(?P<pk>\d+)/edit/?', views.PartAttachmentEdit.as_view(), name='part-attachment-edit'),
@@ -46,6 +51,7 @@ part_detail_urls = [
     url(r'^pricing/', views.PartPricing.as_view(), name='part-pricing'),
     
     url(r'^bom-upload/?', views.BomUpload.as_view(), name='upload-bom'),
+    url(r'^bom-duplicate/?', views.BomDuplicate.as_view(), name='duplicate-bom'),
     
     url(r'^params/', views.PartDetail.as_view(template_name='part/params.html'), name='part-params'),
     url(r'^variants/?', views.PartDetail.as_view(template_name='part/variants.html'), name='part-variants'),
@@ -60,6 +66,7 @@ part_detail_urls = [
     url(r'^sale-prices/', views.PartDetail.as_view(template_name='part/sale_prices.html'), name='part-sale-prices'),
     url(r'^tests/', views.PartDetail.as_view(template_name='part/part_tests.html'), name='part-test-templates'),
     url(r'^track/?', views.PartDetail.as_view(template_name='part/track.html'), name='part-track'),
+    url(r'^related-parts/?', views.PartDetail.as_view(template_name='part/related.html'), name='part-related'),
     url(r'^attachments/?', views.PartDetail.as_view(template_name='part/attachments.html'), name='part-attachments'),
     url(r'^notes/?', views.PartNotes.as_view(), name='part-notes'),
     
@@ -73,11 +80,20 @@ part_detail_urls = [
     url(r'^.*$', views.PartDetail.as_view(), name='part-detail'),
 ]
 
+category_parameter_urls = [
+    url(r'^new/', views.CategoryParameterTemplateCreate.as_view(), name='category-param-template-create'),
+    url(r'^(?P<pid>\d+)/edit/', views.CategoryParameterTemplateEdit.as_view(), name='category-param-template-edit'),
+    url(r'^(?P<pid>\d+)/delete/', views.CategoryParameterTemplateDelete.as_view(), name='category-param-template-delete'),
+]
+
 part_category_urls = [
     url(r'^edit/?', views.CategoryEdit.as_view(), name='category-edit'),
     url(r'^delete/?', views.CategoryDelete.as_view(), name='category-delete'),
 
-    url('^.*$', views.CategoryDetail.as_view(), name='category-detail'),
+    url(r'^parameters/', include(category_parameter_urls)),
+
+    url(r'^parametric/?', views.CategoryParametric.as_view(), name='category-parametric'),
+    url(r'^.*$', views.CategoryDetail.as_view(), name='category-detail'),
 ]
 
 part_bom_urls = [
@@ -110,6 +126,9 @@ part_urls = [
 
     # Part category
     url(r'^category/(?P<pk>\d+)/', include(part_category_urls)),
+
+    # Part related
+    url(r'^related-parts/', include(part_related_urls)),
 
     # Part attachments
     url(r'^attachment/', include(part_attachment_urls)),
