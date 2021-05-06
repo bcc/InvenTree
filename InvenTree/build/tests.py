@@ -10,11 +10,12 @@ from rest_framework.test import APITestCase
 from rest_framework import status
 
 import json
+from datetime import datetime, timedelta
 
 from .models import Build
 from stock.models import StockItem
 
-from InvenTree.status_codes import BuildStatus
+from InvenTree.status_codes import BuildStatus, StockStatus
 
 
 class BuildTestSimple(TestCase):
@@ -69,6 +70,24 @@ class BuildTestSimple(TestCase):
         self.assertEqual(b2.is_complete, True)
 
         self.assertEqual(b2.status, BuildStatus.COMPLETE)
+
+    def test_overdue(self):
+        """
+        Test overdue status functionality
+        """
+
+        today = datetime.now().date()
+
+        build = Build.objects.get(pk=1)
+        self.assertFalse(build.is_overdue)
+
+        build.target_date = today - timedelta(days=1)
+        build.save()
+        self.assertTrue(build.is_overdue)
+
+        build.target_date = today + timedelta(days=80)
+        build.save()
+        self.assertFalse(build.is_overdue)
 
     def test_is_active(self):
         b1 = Build.objects.get(pk=1)
@@ -316,6 +335,7 @@ class TestBuildViews(TestCase):
                 'confirm_incomplete': 1,
                 'location': 1,
                 'output': self.output.pk,
+                'stock_status': StockStatus.DAMAGED
             },
             HTTP_X_REQUESTED_WITH='XMLHttpRequest'
         )
@@ -323,6 +343,7 @@ class TestBuildViews(TestCase):
         self.assertEqual(response.status_code, 200)
 
         data = json.loads(response.content)
+
         self.assertTrue(data['form_valid'])
 
         # Now the build should be able to be completed

@@ -1,12 +1,23 @@
 # -*- coding: utf-8 -*-
 
+from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
+from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
+from django.db.models import UniqueConstraint, Q
+from django.db.utils import IntegrityError
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 from django.dispatch import receiver
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, post_delete
+
+import logging
+
+from InvenTree.ready import canAppAccessDatabase
+
+
+logger = logging.getLogger("inventree")
 
 
 class RuleSet(models.Model):
@@ -25,8 +36,10 @@ class RuleSet(models.Model):
 
     RULESET_CHOICES = [
         ('admin', _('Admin')),
+        ('part_category', _('Part Categories')),
         ('part', _('Parts')),
-        ('stock', _('Stock')),
+        ('stock_location', _('Stock Locations')),
+        ('stock', _('Stock Items')),
         ('build', _('Build Orders')),
         ('purchase_order', _('Purchase Orders')),
         ('sales_order', _('Sales Orders')),
@@ -46,26 +59,43 @@ class RuleSet(models.Model):
             'auth_user',
             'auth_permission',
             'authtoken_token',
+            'authtoken_tokenproxy',
             'users_ruleset',
+            'report_reportasset',
+            'report_reportsnippet',
+            'report_billofmaterialsreport',
+            'report_purchaseorderreport',
+            'report_salesorderreport',
+
+        ],
+        'part_category': [
+            'part_partcategory',
+            'part_partcategoryparametertemplate',
         ],
         'part': [
             'part_part',
             'part_bomitem',
-            'part_partcategory',
             'part_partattachment',
             'part_partsellpricebreak',
             'part_parttesttemplate',
             'part_partparametertemplate',
             'part_partparameter',
             'part_partrelated',
-            'part_partcategoryparametertemplate',
+            'part_partstar',
+            'company_supplierpart',
+            'company_manufacturerpart',
+        ],
+        'stock_location': [
+            'stock_stocklocation',
+            'label_stocklocationlabel',
         ],
         'stock': [
             'stock_stockitem',
-            'stock_stocklocation',
             'stock_stockitemattachment',
             'stock_stockitemtracking',
             'stock_stockitemtestresult',
+            'report_testreport',
+            'label_stockitemlabel',
         ],
         'build': [
             'part_part',
@@ -76,14 +106,15 @@ class RuleSet(models.Model):
             'build_buildorderattachment',
             'stock_stockitem',
             'stock_stocklocation',
+            'report_buildreport',
         ],
         'purchase_order': [
             'company_company',
-            'company_supplierpart',
             'company_supplierpricebreak',
             'order_purchaseorder',
             'order_purchaseorderattachment',
             'order_purchaseorderlineitem',
+            'company_supplierpart',
         ],
         'sales_order': [
             'company_company',
@@ -105,15 +136,19 @@ class RuleSet(models.Model):
         'common_colortheme',
         'common_inventreesetting',
         'company_contact',
-        'label_stockitemlabel',
-        'report_reportasset',
-        'report_testreport',
-        'part_partstar',
+        'users_owner',
 
         # Third-party tables
         'error_report_error',
         'exchange_rate',
         'exchange_exchangebackend',
+
+        # Django-q
+        'django_q_ormq',
+        'django_q_failure',
+        'django_q_task',
+        'django_q_schedule',
+        'django_q_success',
     ]
 
     RULE_OPTIONS = [
@@ -151,6 +186,27 @@ class RuleSet(models.Model):
 
     can_delete = models.BooleanField(verbose_name=_('Delete'), default=False, help_text=_('Permission to delete items'))
     
+    @classmethod
+    def check_table_permission(cls, user, table, permission):
+        """
+        Check if the provided user has the specified permission against the table
+        """
+
+        # If the table does *not* require permissions
+        if table in cls.RULESET_IGNORE:
+            return True
+
+        # Work out which roles touch the given table
+        for role in cls.RULESET_NAMES:
+            if table in cls.RULESET_MODELS[role]:
+
+                if check_user_role(user, role, permission):
+                    return True
+
+        # Print message instead of throwing an error
+        print("Failed permission check for", table, permission)
+        return False
+
     @staticmethod
     def get_model_permission_string(model, permission):
         """
@@ -215,6 +271,9 @@ def update_group_roles(group, debug=False):
     The RuleSet model has complete control over the permissions applied to any group.
 
     """
+
+    if not canAppAccessDatabase():
+        return
 
     # List of permissions already associated with this group
     group_permissions = set()
@@ -307,7 +366,7 @@ def update_group_roles(group, debug=False):
             content_type = ContentType.objects.get(app_label=app, model=model)
             permission = Permission.objects.get(content_type=content_type, codename=perm)
         except ContentType.DoesNotExist:
-            print(f"Error: Could not find permission matching '{permission_string}'")
+            logger.warning(f"Error: Could not find permission matching '{permission_string}'")
             permission = None
 
         return permission
@@ -343,7 +402,7 @@ def update_group_roles(group, debug=False):
             print(f"Removing permission {perm} from group {group.name}")
 
 
-@receiver(post_save, sender=Group)
+@receiver(post_save, sender=Group, dispatch_uid='create_missing_rule_sets')
 def create_missing_rule_sets(sender, instance, **kwargs):
     """
     Called *after* a Group object is saved.
@@ -385,3 +444,151 @@ def check_user_role(user, role, permission):
 
     # No matching permissions found
     return False
+
+
+class Owner(models.Model):
+    """
+    The Owner class is a proxy for a Group or User instance.
+    Owner can be associated to any InvenTree model (part, stock, build, etc.)
+
+    owner_type: Model type (Group or User)
+    owner_id: Group or User instance primary key
+    owner: Returns the Group or User instance combining the owner_type and owner_id fields
+    """
+
+    class Meta:
+        # Ensure all owners are unique
+        constraints = [
+            UniqueConstraint(fields=['owner_type', 'owner_id'],
+                             name='unique_owner')
+        ]
+
+    owner_type = models.ForeignKey(ContentType, on_delete=models.CASCADE, null=True, blank=True)
+
+    owner_id = models.PositiveIntegerField(null=True, blank=True)
+
+    owner = GenericForeignKey('owner_type', 'owner_id')
+
+    def __str__(self):
+        """ Defines the owner string representation """
+        return f'{self.owner} ({self.owner_type.name})'
+
+    @classmethod
+    def create(cls, obj):
+        """ Check if owner exist then create new owner entry """
+
+        # Check for existing owner
+        existing_owner = cls.get_owner(obj)
+
+        if not existing_owner:
+            # Create new owner
+            try:
+                return cls.objects.create(owner=obj)
+            except IntegrityError:
+                return None
+
+        return existing_owner
+
+    @classmethod
+    def get_owner(cls, user_or_group):
+        """ Get owner instance for a group or user """
+
+        user_model = get_user_model()
+        owner = None
+        content_type_id = 0
+        content_type_id_list = [ContentType.objects.get_for_model(Group).id,
+                                ContentType.objects.get_for_model(user_model).id]
+
+        # If instance type is obvious: set content type
+        if type(user_or_group) is Group:
+            content_type_id = content_type_id_list[0]
+        elif type(user_or_group) is get_user_model():
+            content_type_id = content_type_id_list[1]
+
+        if content_type_id:
+            try:
+                owner = Owner.objects.get(owner_id=user_or_group.id,
+                                          owner_type=content_type_id)
+            except Owner.DoesNotExist:
+                pass
+        else:
+            # Check whether user_or_group is a Group instance
+            try:
+                group = Group.objects.get(pk=user_or_group.id)
+            except Group.DoesNotExist:
+                group = None
+
+            if group:
+                try:
+                    owner = Owner.objects.get(owner_id=user_or_group.id,
+                                              owner_type=content_type_id_list[0])
+                except Owner.DoesNotExist:
+                    pass
+
+                return owner
+
+            # Check whether user_or_group is a User instance
+            try:
+                user = user_model.objects.get(pk=user_or_group.id)
+            except user_model.DoesNotExist:
+                user = None
+
+            if user:
+                try:
+                    owner = Owner.objects.get(owner_id=user_or_group.id,
+                                              owner_type=content_type_id_list[1])
+                except Owner.DoesNotExist:
+                    pass
+
+                return owner
+                
+        return owner
+
+    def get_related_owners(self, include_group=False):
+        """
+        Get all owners "related" to an owner.
+        This method is useful to retrieve all "user-type" owners linked to a "group-type" owner
+        """
+
+        user_model = get_user_model()
+        related_owners = None
+
+        if type(self.owner) is Group:
+            users = user_model.objects.filter(groups__name=self.owner.name)
+
+            if include_group:
+                # Include "group-type" owner in the query
+                query = Q(owner_id__in=users, owner_type=ContentType.objects.get_for_model(user_model).id) | \
+                    Q(owner_id=self.owner.id, owner_type=ContentType.objects.get_for_model(Group).id)
+            else:
+                query = Q(owner_id__in=users, owner_type=ContentType.objects.get_for_model(user_model).id)
+            
+            related_owners = Owner.objects.filter(query)
+
+        elif type(self.owner) is user_model:
+            related_owners = [self]
+
+        return related_owners
+
+
+@receiver(post_save, sender=Group, dispatch_uid='create_owner')
+@receiver(post_save, sender=get_user_model(), dispatch_uid='create_owner')
+def create_owner(sender, instance, **kwargs):
+    """
+    Callback function to create a new owner instance
+    after either a new group or user instance is saved.
+    """
+
+    Owner.create(obj=instance)
+
+
+@receiver(post_delete, sender=Group, dispatch_uid='delete_owner')
+@receiver(post_delete, sender=get_user_model(), dispatch_uid='delete_owner')
+def delete_owner(sender, instance, **kwargs):
+    """
+    Callback function to delete an owner instance
+    after either a new group or user instance is deleted.
+    """
+
+    owner = Owner.get_owner(instance)
+    owner.delete()

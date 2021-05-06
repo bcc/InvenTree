@@ -1,17 +1,20 @@
 {% extends "base.html" %}
 {% load static %}
 {% load i18n %}
+{% load inventree_extras %}
 
 {% block page_title %}
 {% if location %}
-InvenTree | {% trans "Stock Location" %} - {{ location }}
+{% inventree_title %} | {% trans "Stock Location" %} - {{ location }}
 {% else %}
-InvenTree | Stock
+{% inventree_title %} | {% trans "Stock" %}
 {% endif %}
 {% endblock %}
 
 {% block sidenav %}
-<div id='stock-tree'></div>
+<div id='stock-tree'>
+    {% trans "Loading..." %}
+</div>
 {% endblock %}
 
 {% block pre_content %}
@@ -24,6 +27,7 @@ InvenTree | Stock
 
 {% block js_ready %}
 {{ block.super }}
+
     loadTree("{% url 'api-stock-tree' %}",
         "#stock-tree",
         {
@@ -31,10 +35,10 @@ InvenTree | Stock
         }
     );
 
-    $("#toggle-stock-tree").click(function() {
-        toggleSideNav("#sidenav");
-        return false;
-    })
+    initNavTree({
+        label: 'stock',
+        treeId: '#sidenav-left',
+        toggleId: '#toggle-stock-tree',
+    });
 
-    initSideNav();
 {% endblock %}

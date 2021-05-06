@@ -3,12 +3,16 @@ from __future__ import unicode_literals
 import os
 import logging
 
+from PIL import UnidentifiedImageError
+
 from django.apps import AppConfig
 from django.db.utils import OperationalError, ProgrammingError
 from django.conf import settings
 
+from InvenTree.ready import canAppAccessDatabase
 
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("inventree")
 
 
 class CompanyConfig(AppConfig):
@@ -19,7 +23,8 @@ class CompanyConfig(AppConfig):
         This function is called whenever the Company app is loaded.
         """
 
-        self.generate_company_thumbs()
+        if canAppAccessDatabase():
+            self.generate_company_thumbs()
 
     def generate_company_thumbs(self):
 
@@ -38,9 +43,11 @@ class CompanyConfig(AppConfig):
                         try:
                             company.image.render_variations(replace=False)
                         except FileNotFoundError:
-                            logger.warning("Image file missing")
+                            logger.warning(f"Image file '{company.image}' missing")
                             company.image = None
                             company.save()
+                        except UnidentifiedImageError:
+                            logger.warning(f"Image file '{company.image}' is invalid")
         except (OperationalError, ProgrammingError):
             # Getting here probably meant the database was in test mode
             pass

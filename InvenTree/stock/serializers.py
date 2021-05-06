@@ -84,7 +84,7 @@ class StockItemSerializer(InvenTreeModelSerializer):
             'sales_order',
             'supplier_part',
             'supplier_part__supplier',
-            'supplier_part__manufacturer',
+            'supplier_part__manufacturer_part__manufacturer',
             'allocations',
             'sales_order_allocations',
             'location',
@@ -198,6 +198,7 @@ class StockItemSerializer(InvenTreeModelSerializer):
             'location',
             'location_detail',
             'notes',
+            'packaging',
             'part',
             'part_detail',
             'pk',
@@ -208,10 +209,12 @@ class StockItemSerializer(InvenTreeModelSerializer):
             'stale',
             'status',
             'status_text',
+            'stocktake_date',
             'supplier_part',
             'supplier_part_detail',
             'tracking_items',
             'uid',
+            'updated',
         ]
 
         """ These fields are read-only in this context.

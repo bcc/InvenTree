@@ -5,11 +5,18 @@
 {% load i18n %}
 {% load static %}
 
+{% block menubar %}
+{% include 'order/po_navbar.html' with tab='details' %}
+
+{% endblock %}
+
+{% block heading %}
+{% trans "Purchase Order Items" %}
+{% endblock %}
+
+
 {% block details %}
 
-{% include 'order/po_tabs.html' with tab='details' %}
-
-<hr>
 
 <div id='order-toolbar-buttons' class='btn-group' style='float: right;'>
     {% if order.status == PurchaseOrderStatus.PENDING and roles.purchase_order.change %}
@@ -18,7 +25,6 @@
     {% endif %}
 </div>
 
-<h4>{% trans "Purchase Order Items" %}</h4>
 
 <table class='table table-striped table-condensed' id='po-table' data-toolbar='#order-toolbar-buttons'>
 </table>
@@ -28,31 +34,6 @@
 {% block js_ready %}
 
 {{ block.super }}
-
-
-$("#receive-order").click(function() {
-    launchModalForm("{% url 'po-receive' order.id %}", {
-        reload: true,
-        secondary: [
-            {
-                field: 'location',
-                label: '{% trans "New Location" %}',
-                title: '{% trans "Create new stock location" %}',
-                url: "{% url 'stock-location-create' %}",
-            },
-        ]
-    });
-});
-
-$("#complete-order").click(function() {
-    launchModalForm("{% url 'po-complete' order.id %}", {
-        reload: true,
-    });
-});
-
-$("#export-order").click(function() {
-    location.href = "{% url 'po-export' order.id %}";
-});
 
 {% if order.status == PurchaseOrderStatus.PENDING %}
 $('#new-po-line').click(function() {
@@ -129,6 +110,7 @@ function setupCallbacks() {
 $("#po-table").inventreeTable({
     onPostBody: setupCallbacks,
     name: 'purchaseorder',
+    sidePagination: 'server',
     formatNoMatches: function() { return "{% trans 'No line items found' %}"; },
     queryParams: {
         order: {{ order.id }},
@@ -145,6 +127,7 @@ $("#po-table").inventreeTable({
         {
             field: 'part',
             sortable: true,
+            sortName: 'part__part__name',
             title: '{% trans "Part" %}',
             switchable: false,
             formatter: function(value, row, index, field) {
@@ -156,16 +139,29 @@ $("#po-table").inventreeTable({
             },
         },
         {
-            sortable: true,
             field: 'part_detail.description',
             title: '{% trans "Description" %}',
         },
         {
             sortable: true,
+            sortName: 'part__SKU',
             field: 'supplier_part_detail.SKU',
-            title: '{% trans "Order Code" %}',
+            title: '{% trans "SKU" %}',
             formatter: function(value, row, index, field) {
                 return renderLink(value, `/supplier-part/${row.part}/`);
+            },
+        },
+        {
+            sortable: true,
+            sortName: 'part__MPN',
+            field: 'supplier_part_detail.MPN',
+            title: '{% trans "MPN" %}',
+            formatter: function(value, row, index, field) {
+                if (row.supplier_part_detail.manufacturer_part) {
+                    return renderLink(value, `/manufacturer-part/${row.supplier_part_detail.manufacturer_part.pk}/`);
+                } else {
+                    return "";
+                }
             },
         },
         {
@@ -239,6 +235,5 @@ $("#po-table").inventreeTable({
         }
     ]
 });
-
 
 {% endblock %}

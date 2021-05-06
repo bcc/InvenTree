@@ -5,7 +5,7 @@ Django views for interacting with Build objects
 # -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 
-from django.utils.translation import ugettext as _
+from django.utils.translation import ugettext_lazy as _
 from django.core.exceptions import ValidationError
 from django.views.generic import DetailView, ListView, UpdateView
 from django.forms import HiddenInput
@@ -18,8 +18,8 @@ from stock.models import StockLocation, StockItem
 
 from InvenTree.views import AjaxUpdateView, AjaxCreateView, AjaxDeleteView
 from InvenTree.views import InvenTreeRoleMixin
-from InvenTree.helpers import str2bool, extract_serial_numbers, normalize
-from InvenTree.status_codes import BuildStatus
+from InvenTree.helpers import str2bool, extract_serial_numbers, normalize, isNull
+from InvenTree.status_codes import BuildStatus, StockStatus
 
 
 class BuildIndex(InvenTreeRoleMixin, ListView):
@@ -28,7 +28,6 @@ class BuildIndex(InvenTreeRoleMixin, ListView):
     model = Build
     template_name = 'build/index.html'
     context_object_name = 'builds'
-    role_required = 'build.view'
 
     def get_queryset(self):
         """ Return all Build objects (order by date, newest first) """
@@ -58,7 +57,6 @@ class BuildCancel(AjaxUpdateView):
     ajax_form_title = _('Cancel Build')
     context_object_name = 'build'
     form_class = forms.CancelBuildForm
-    role_required = 'build.change'
 
     def validate(self, build, form, **kwargs):
 
@@ -92,7 +90,6 @@ class BuildAutoAllocate(AjaxUpdateView):
     context_object_name = 'build'
     ajax_form_title = _('Allocate Stock')
     ajax_template_name = 'build/auto_allocate.html'
-    role_required = 'build.change'
 
     def get_initial(self):
         """
@@ -100,16 +97,6 @@ class BuildAutoAllocate(AjaxUpdateView):
         """
 
         initials = super().get_initial()
-
-        # Pointing to a particular build output?
-        output = self.get_param('output')
-
-        if output:
-            try:
-                output = StockItem.objects.get(pk=output)
-                initials['output'] = output
-            except (ValueError, StockItem.DoesNotExist):
-                pass
 
         return initials
 
@@ -122,18 +109,7 @@ class BuildAutoAllocate(AjaxUpdateView):
 
         build = self.get_object()
 
-        form = self.get_form()
-
-        output_id = form['output'].value()
-
-        try:
-            output = StockItem.objects.get(pk=output_id)
-        except (ValueError, StockItem.DoesNotExist):
-            output = None
-
-        if output:
-            context['output'] = output
-            context['allocations'] = build.getAutoAllocations(output)
+        context['allocations'] = build.getAutoAllocations()
 
         context['build'] = build
 
@@ -143,18 +119,11 @@ class BuildAutoAllocate(AjaxUpdateView):
 
         form = super().get_form()
 
-        if form['output'].value():
-            # Hide the 'output' field
-            form.fields['output'].widget = HiddenInput()
-
         return form
 
     def validate(self, build, form, **kwargs):
 
-        output = form.cleaned_data.get('output', None)
-
-        if not output:
-            form.add_error(None, _('Build output must be specified'))
+        pass
 
     def save(self, build, form, **kwargs):
         """
@@ -162,9 +131,7 @@ class BuildAutoAllocate(AjaxUpdateView):
         perform auto-allocations
         """
 
-        output = form.cleaned_data.get('output', None)
-
-        build.autoAllocate(output)
+        build.autoAllocate()
 
     def get_data(self):
         return {
@@ -181,7 +148,6 @@ class BuildOutputCreate(AjaxUpdateView):
     form_class = forms.BuildOutputCreateForm
     ajax_template_name = 'build/build_output_create.html'
     ajax_form_title = _('Create Build Output')
-    role_required = 'build.change'
 
     def validate(self, build, form, **kwargs):
         """
@@ -190,6 +156,17 @@ class BuildOutputCreate(AjaxUpdateView):
 
         quantity = form.cleaned_data.get('output_quantity', None)
         serials = form.cleaned_data.get('serial_numbers', None)
+
+        if quantity:
+            build = self.get_object()
+            
+            # Check that requested output don't exceed build remaining quantity
+            maximum_output = int(build.remaining - build.incomplete_count)
+            if quantity > maximum_output:
+                form.add_error(
+                    'output_quantity',
+                    _('Maximum output quantity is ') + str(maximum_output),
+                )
 
         # Check that the serial numbers are valid
         if serials:
@@ -246,7 +223,7 @@ class BuildOutputCreate(AjaxUpdateView):
 
         # Calculate the required quantity
         quantity = max(0, build.remaining - build.incomplete_count)
-        initials['quantity'] = quantity
+        initials['output_quantity'] = int(quantity)
 
         return initials
 
@@ -280,6 +257,7 @@ class BuildOutputDelete(AjaxUpdateView):
     model = Build
     form_class = forms.BuildOutputDeleteForm
     ajax_form_title = _('Delete Build Output')
+
     role_required = 'build.delete'
 
     def get_initial(self):
@@ -340,8 +318,7 @@ class BuildUnallocate(AjaxUpdateView):
     form_class = forms.UnallocateBuildForm
     ajax_form_title = _("Unallocate Stock")
     ajax_template_name = "build/unallocate.html"
-    role_required = 'build.change'
-
+    
     def get_initial(self):
 
         initials = super().get_initial()
@@ -369,10 +346,16 @@ class BuildUnallocate(AjaxUpdateView):
 
         output_id = request.POST.get('output_id', None)
 
-        try:
-            output = StockItem.objects.get(pk=output_id)
-        except (ValueError, StockItem.DoesNotExist):
-            output = None
+        if output_id:
+
+            # If a "null" output is provided, we are trying to unallocate "untracked" stock
+            if isNull(output_id):
+                output = None
+            else:
+                try:
+                    output = StockItem.objects.get(pk=output_id)
+                except (ValueError, StockItem.DoesNotExist):
+                    output = None
 
         part_id = request.POST.get('part_id', None)
 
@@ -387,9 +370,19 @@ class BuildUnallocate(AjaxUpdateView):
             form.add_error('confirm', _('Confirm unallocation of build stock'))
             form.add_error(None, _('Check the confirmation box'))
         else:
-            build.unallocateStock(output=output, part=part)
+
             valid = True
 
+            # Unallocate the entire build
+            if not output_id:
+                build.unallocateAll()
+            # Unallocate a single output
+            elif output:
+                build.unallocateOutput(output, part=part)
+            # Unallocate "untracked" parts
+            else:
+                build.unallocateUntracked(part=part)
+        
         data = {
             'form_valid': valid,
         }
@@ -408,14 +401,14 @@ class BuildComplete(AjaxUpdateView):
 
     model = Build
     form_class = forms.CompleteBuildForm
-    role_required = 'build.change'
+    
     ajax_form_title = _('Complete Build Order')
     ajax_template_name = 'build/complete.html'
 
     def validate(self, build, form, **kwargs):
 
-        if not build.can_complete:
-            form.add_error(None, _('Build order cannot be completed'))
+        if build.incomplete_count > 0:
+            form.add_error(None, _('Build order cannot be completed - incomplete outputs remain'))
 
     def save(self, build, form, **kwargs):
         """
@@ -435,7 +428,7 @@ class BuildOutputComplete(AjaxUpdateView):
     View to mark a particular build output as Complete.
 
     - Notifies the user of which parts will be removed from stock.
-    - Removes allocated items from stock
+    - Assignes (tracked) allocated items from stock to the build output
     - Deletes pending BuildItem objects
     """
 
@@ -444,8 +437,7 @@ class BuildOutputComplete(AjaxUpdateView):
     context_object_name = "build"
     ajax_form_title = _("Complete Build Output")
     ajax_template_name = "build/complete_output.html"
-    role_required = 'build.change'
-
+    
     def get_form(self):
         
         build = self.get_object()
@@ -468,10 +460,24 @@ class BuildOutputComplete(AjaxUpdateView):
         return form
 
     def validate(self, build, form, **kwargs):
+        """
+        Custom validation steps for the BuildOutputComplete" form
+        """
 
         data = form.cleaned_data
 
         output = data.get('output', None)
+
+        stock_status = data.get('stock_status', StockStatus.OK)
+
+        # Any "invalid" stock status defaults to OK
+        try:
+            stock_status = int(stock_status)
+        except (ValueError):
+            stock_status = StockStatus.OK
+
+        if int(stock_status) not in StockStatus.keys():
+            form.add_error('stock_status', _('Invalid stock status value selected'))
 
         if output:
 
@@ -564,12 +570,20 @@ class BuildOutputComplete(AjaxUpdateView):
 
         location = data.get('location', None)
         output = data.get('output', None)
+        stock_status = data.get('stock_status', StockStatus.OK)
+
+        # Any "invalid" stock status defaults to OK
+        try:
+            stock_status = int(stock_status)
+        except (ValueError):
+            stock_status = StockStatus.OK
 
         # Complete the build output
         build.completeBuildOutput(
             output,
             self.request.user,
             location=location,
+            status=stock_status,
         )
     
     def get_data(self):
@@ -579,13 +593,15 @@ class BuildOutputComplete(AjaxUpdateView):
         }
 
 
-class BuildNotes(UpdateView):
+class BuildNotes(InvenTreeRoleMixin, UpdateView):
     """ View for editing the 'notes' field of a Build object.
     """
 
     context_object_name = 'build'
     template_name = 'build/notes.html'
     model = Build
+    
+    # Override the default permission role for this View
     role_required = 'build.view'
 
     fields = ['notes']
@@ -602,13 +618,12 @@ class BuildNotes(UpdateView):
         return ctx
 
 
-class BuildDetail(DetailView):
+class BuildDetail(InvenTreeRoleMixin, DetailView):
     """ Detail view of a single Build object. """
 
     model = Build
     template_name = 'build/detail.html'
     context_object_name = 'build'
-    role_required = 'build.view'
 
     def get_context_data(self, **kwargs):
 
@@ -618,16 +633,16 @@ class BuildDetail(DetailView):
 
         ctx['bom_price'] = build.part.get_price_info(build.quantity, buy=False)
         ctx['BuildStatus'] = BuildStatus
+        ctx['sub_build_count'] = build.sub_build_count()
 
         return ctx
 
 
-class BuildAllocate(DetailView):
+class BuildAllocate(InvenTreeRoleMixin, DetailView):
     """ View for allocating parts to a Build """
     model = Build
     context_object_name = 'build'
     template_name = 'build/allocate.html'
-    role_required = ['build.change']
 
     def get_context_data(self, **kwargs):
         """ Provide extra context information for the Build allocation page """
@@ -636,10 +651,12 @@ class BuildAllocate(DetailView):
 
         build = self.get_object()
         part = build.part
-        bom_items = part.bom_items
+        bom_items = build.bom_items
 
         context['part'] = part
         context['bom_items'] = bom_items
+        context['has_tracked_bom_items'] = build.has_tracked_bom_items()
+        context['has_untracked_bom_items'] = build.has_untracked_bom_items()
         context['BuildStatus'] = BuildStatus
 
         context['bom_price'] = build.part.get_price_info(build.quantity, buy=False)
@@ -651,13 +668,15 @@ class BuildAllocate(DetailView):
 
 
 class BuildCreate(AjaxCreateView):
-    """ View to create a new Build object """
+    """
+    View to create a new Build object
+    """
+
     model = Build
     context_object_name = 'build'
     form_class = forms.EditBuildForm
     ajax_form_title = _('New Build Order')
     ajax_template_name = 'modal_form.html'
-    role_required = 'build.add'
 
     def get_form(self):
         form = super().get_form()
@@ -675,6 +694,13 @@ class BuildCreate(AjaxCreateView):
 
         initials = super(BuildCreate, self).get_initial().copy()
 
+        initials['parent'] = self.request.GET.get('parent', None)
+
+        # User has provided a SalesOrder ID
+        initials['sales_order'] = self.request.GET.get('sales_order', None)
+
+        initials['quantity'] = self.request.GET.get('quantity', 1)
+
         part = self.request.GET.get('part', None)
 
         if part:
@@ -684,17 +710,20 @@ class BuildCreate(AjaxCreateView):
                 # User has provided a Part ID
                 initials['part'] = part
                 initials['destination'] = part.get_default_location()
+
+                to_order = part.quantity_to_order
+
+                if to_order < 1:
+                    to_order = 1
+
+                initials['quantity'] = to_order
             except (ValueError, Part.DoesNotExist):
                 pass
 
         initials['reference'] = Build.getNextBuildNumber()
 
-        initials['parent'] = self.request.GET.get('parent', None)
-
-        # User has provided a SalesOrder ID
-        initials['sales_order'] = self.request.GET.get('sales_order', None)
-
-        initials['quantity'] = self.request.GET.get('quantity', 1)
+        # Pre-fill the issued_by user
+        initials['issued_by'] = self.request.user
 
         return initials
 
@@ -723,7 +752,6 @@ class BuildUpdate(AjaxUpdateView):
     context_object_name = 'build'
     ajax_form_title = _('Edit Build Order Details')
     ajax_template_name = 'modal_form.html'
-    role_required = 'build.change'
 
     def get_form(self):
 
@@ -765,7 +793,6 @@ class BuildDelete(AjaxDeleteView):
     model = Build
     ajax_template_name = 'build/delete_build.html'
     ajax_form_title = _('Delete Build Order')
-    role_required = 'build.delete'
 
 
 class BuildItemDelete(AjaxDeleteView):
@@ -777,8 +804,7 @@ class BuildItemDelete(AjaxDeleteView):
     ajax_template_name = 'build/delete_build_item.html'
     ajax_form_title = _('Unallocate Stock')
     context_object_name = 'item'
-    role_required = 'build.delete'
-
+    
     def get_data(self):
         return {
             'danger': _('Removed parts from build allocation')
@@ -794,7 +820,6 @@ class BuildItemCreate(AjaxCreateView):
     form_class = forms.EditBuildItemForm
     ajax_template_name = 'build/create_build_item.html'
     ajax_form_title = _('Allocate stock to build output')
-    role_required = 'build.add'
 
     # The output StockItem against which the allocation is being made
     output = None
@@ -1010,8 +1035,7 @@ class BuildItemEdit(AjaxUpdateView):
     ajax_template_name = 'build/edit_build_item.html'
     form_class = forms.EditBuildItemForm
     ajax_form_title = _('Edit Stock Allocation')
-    role_required = 'build.change'
-
+    
     def get_data(self):
         return {
             'info': _('Updated Build Item'),
@@ -1044,8 +1068,7 @@ class BuildAttachmentCreate(AjaxCreateView):
     model = BuildOrderAttachment
     form_class = forms.EditBuildAttachmentForm
     ajax_form_title = _('Add Build Order Attachment')
-    role_required = 'build.add'
-
+    
     def save(self, form, **kwargs):
         """
         Add information on the user that uploaded the attachment
@@ -1094,7 +1117,6 @@ class BuildAttachmentEdit(AjaxUpdateView):
     model = BuildOrderAttachment
     form_class = forms.EditBuildAttachmentForm
     ajax_form_title = _('Edit Attachment')
-    role_required = 'build.change'
 
     def get_form(self):
         form = super().get_form()
@@ -1116,7 +1138,6 @@ class BuildAttachmentDelete(AjaxDeleteView):
     model = BuildOrderAttachment
     ajax_form_title = _('Delete Attachment')
     context_object_name = 'attachment'
-    role_required = 'build.delete'
 
     def get_data(self):
         return {

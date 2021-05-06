@@ -20,6 +20,7 @@ build_detail_urls = [
 
     url(r'^notes/', views.BuildNotes.as_view(), name='build-notes'),
 
+    url(r'^children/', views.BuildDetail.as_view(template_name='build/build_children.html'), name='build-children'),
     url(r'^attachments/', views.BuildDetail.as_view(template_name='build/attachments.html'), name='build-attachments'),
     url(r'^output/', views.BuildDetail.as_view(template_name='build/build_output.html'), name='build-output'),
 

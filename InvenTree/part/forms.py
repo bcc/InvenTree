@@ -11,7 +11,9 @@ from InvenTree.fields import RoundingDecimalFormField
 
 from mptt.fields import TreeNodeChoiceField
 from django import forms
-from django.utils.translation import ugettext as _
+from django.utils.translation import ugettext_lazy as _
+
+import common.models
 
 from .models import Part, PartCategory, PartAttachment, PartRelated
 from .models import BomItem
@@ -23,8 +25,34 @@ from .models import PartSellPriceBreak
 
 class PartModelChoiceField(forms.ModelChoiceField):
     """ Extending string representation of Part instance with available stock """
+
     def label_from_instance(self, part):
-        return f'{part} - {part.available_stock}'
+
+        label = str(part)
+
+        # Optionally display available part quantity
+        if common.models.InvenTreeSetting.get_setting('PART_SHOW_QUANTITY_IN_FORMS'):
+            label += f" - {part.available_stock}"
+
+        return label
+
+
+class PartImageDownloadForm(HelperForm):
+    """
+    Form for downloading an image from a URL
+    """
+
+    url = forms.URLField(
+        label=_('URL'),
+        help_text=_('Image URL'),
+        required=True,
+    )
+
+    class Meta:
+        model = Part
+        fields = [
+            'url',
+        ]
 
 
 class PartImageForm(HelperForm):
@@ -67,9 +95,11 @@ class BomExportForm(forms.Form):
     parameter_data = forms.BooleanField(label=_("Include Parameter Data"), required=False, initial=False, help_text=_("Include part parameters data in exported BOM"))
 
     stock_data = forms.BooleanField(label=_("Include Stock Data"), required=False, initial=False, help_text=_("Include part stock data in exported BOM"))
+    
+    manufacturer_data = forms.BooleanField(label=_("Include Manufacturer Data"), required=False, initial=True, help_text=_("Include part manufacturer data in exported BOM"))
 
     supplier_data = forms.BooleanField(label=_("Include Supplier Data"), required=False, initial=True, help_text=_("Include part supplier data in exported BOM"))
-
+    
     def get_choices(self):
         """ BOM export format choices """
 
@@ -101,6 +131,7 @@ class BomDuplicateForm(HelperForm):
 
     confirm = forms.BooleanField(
         required=False, initial=False,
+        label=_('Confirm'),
         help_text=_('Confirm BOM duplication')
     )
 
@@ -119,7 +150,7 @@ class BomValidateForm(HelperForm):
     to confirm that the BOM for this part is valid
     """
 
-    validate = forms.BooleanField(required=False, initial=False, help_text=_('Confirm that the BOM is correct'))
+    validate = forms.BooleanField(required=False, initial=False, label=_('validate'), help_text=_('Confirm that the BOM is correct'))
 
     class Meta:
         model = Part
@@ -131,7 +162,7 @@ class BomValidateForm(HelperForm):
 class BomUploadSelectFile(HelperForm):
     """ Form for importing a BOM. Provides a file input box for upload """
 
-    bom_file = forms.FileField(label='BOM file', required=True, help_text=_("Select BOM file to upload"))
+    bom_file = forms.FileField(label=_('BOM file'), required=True, help_text=_("Select BOM file to upload"))
 
     class Meta:
         model = Part
@@ -308,9 +339,9 @@ class EditCategoryParameterTemplateForm(HelperForm):
 class EditBomItemForm(HelperForm):
     """ Form for editing a BomItem object """
 
-    quantity = RoundingDecimalFormField(max_digits=10, decimal_places=5)
+    quantity = RoundingDecimalFormField(max_digits=10, decimal_places=5, label=_('Quantity'))
 
-    sub_part = PartModelChoiceField(queryset=Part.objects.all())
+    sub_part = PartModelChoiceField(queryset=Part.objects.all(), label=_('Sub part'))
 
     class Meta:
         model = BomItem
@@ -321,6 +352,7 @@ class EditBomItemForm(HelperForm):
             'reference',
             'overage',
             'note',
+            'inherited',
             'optional',
         ]
 
@@ -336,6 +368,7 @@ class PartPriceForm(forms.Form):
     quantity = forms.IntegerField(
         required=True,
         initial=1,
+        label=_('Quantity'),
         help_text=_('Input quantity for price calculation')
     )
 
@@ -351,7 +384,7 @@ class EditPartSalePriceBreakForm(HelperForm):
     Form for creating / editing a sale price for a part
     """
 
-    quantity = RoundingDecimalFormField(max_digits=10, decimal_places=5)
+    quantity = RoundingDecimalFormField(max_digits=10, decimal_places=5, label=_('Quantity'))
 
     class Meta:
         model = PartSellPriceBreak

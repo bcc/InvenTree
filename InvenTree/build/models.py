@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 
 from django.contrib.auth.models import User
-from django.utils.translation import ugettext as _
+from django.utils.translation import ugettext_lazy as _
 from django.core.exceptions import ValidationError
 
 from django.urls import reverse
@@ -22,8 +22,8 @@ from markdownx.models import MarkdownxField
 
 from mptt.models import MPTTModel, TreeForeignKey
 
-from InvenTree.status_codes import BuildStatus
-from InvenTree.helpers import increment, getSetting, normalize
+from InvenTree.status_codes import BuildStatus, StockStatus
+from InvenTree.helpers import increment, getSetting, normalize, MakeBarcode
 from InvenTree.validators import validate_build_order_reference
 from InvenTree.models import InvenTreeAttachment
 
@@ -33,6 +33,7 @@ import InvenTree.fields
 
 from stock import models as StockModels
 from part import models as PartModels
+from users import models as UserModels
 
 
 class Build(MPTTModel):
@@ -53,6 +54,9 @@ class Build(MPTTModel):
         completion_date: Date the build was completed (or, if incomplete, the expected date of completion)
         link: External URL for extra information
         notes: Text notes
+        completed_by: User that completed the build
+        issued_by: User that issued the build
+        responsible: User (or group) responsible for completing the build
     """
 
     OVERDUE_FILTER = Q(status__in=BuildStatus.ACTIVE_CODES) & ~Q(target_date=None) & Q(target_date__lte=datetime.now().date())
@@ -60,6 +64,20 @@ class Build(MPTTModel):
     class Meta:
         verbose_name = _("Build Order")
         verbose_name_plural = _("Build Orders")
+
+    def format_barcode(self, **kwargs):
+        """
+        Return a JSON string to represent this build as a barcode
+        """
+
+        return MakeBarcode(
+            "buildorder",
+            self.pk,
+            {
+                "reference": self.title,
+                "url": self.get_absolute_url(),
+            }
+        )
 
     @staticmethod
     def filterByDate(queryset, min_date, max_date):
@@ -198,7 +216,7 @@ class Build(MPTTModel):
         help_text=_('Batch code for this build output')
     )
     
-    creation_date = models.DateField(auto_now_add=True, editable=False)
+    creation_date = models.DateField(auto_now_add=True, editable=False, verbose_name=_('Creation Date'))
     
     target_date = models.DateField(
         null=True, blank=True,
@@ -206,13 +224,32 @@ class Build(MPTTModel):
         help_text=_('Target date for build completion. Build will be overdue after this date.')
     )
 
-    completion_date = models.DateField(null=True, blank=True)
+    completion_date = models.DateField(null=True, blank=True, verbose_name=_('Completion Date'))
 
     completed_by = models.ForeignKey(
         User,
         on_delete=models.SET_NULL,
         blank=True, null=True,
+        verbose_name=_('completed by'),
         related_name='builds_completed'
+    )
+
+    issued_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        blank=True, null=True,
+        verbose_name=_('Issued by'),
+        help_text=_('User who issued this build order'),
+        related_name='builds_issued',
+    )
+
+    responsible = models.ForeignKey(
+        UserModels.Owner,
+        on_delete=models.SET_NULL,
+        blank=True, null=True,
+        verbose_name=_('Responsible'),
+        help_text=_('User responsible for this build order'),
+        related_name='builds_responsible',
     )
     
     link = InvenTree.fields.InvenTreeURLField(
@@ -225,22 +262,40 @@ class Build(MPTTModel):
         blank=True, help_text=_('Extra build notes')
     )
 
+    def sub_builds(self, cascade=True):
+        """
+        Return all Build Order objects under this one.
+        """
+
+        if cascade:
+            return Build.objects.filter(parent=self.pk)
+        else:
+            descendants = self.get_descendants(include_self=True)
+            Build.objects.filter(parent__pk__in=[d.pk for d in descendants])
+    
+    def sub_build_count(self, cascade=True):
+        """
+        Return the number of sub builds under this one.
+
+        Args:
+            cascade: If True (defualt), include cascading builds under sub builds
+        """
+
+        return self.sub_builds(cascade=cascade).count()
+
+    @property
     def is_overdue(self):
         """
         Returns true if this build is "overdue":
 
-        - Not completed
-        - Target date is "in the past"
+        Makes use of the OVERDUE_FILTER to avoid code duplication
         """
 
-        # Cannot be deemed overdue if target_date is not set
-        if self.target_date is None:
-            return False
+        query = Build.objects.filter(pk=self.pk)
+        query = query.filter(Build.OVERDUE_FILTER)
 
-        today = datetime.now().date()
-
-        return self.active and self.target_date < today
-
+        return query.exists()
+    
     @property
     def active(self):
         """
@@ -258,6 +313,42 @@ class Build(MPTTModel):
         return self.part.bom_items.all().prefetch_related(
             'sub_part'
         )
+
+    @property
+    def tracked_bom_items(self):
+        """
+        Returns the "trackable" BOM items for this BuildOrder
+        """
+
+        items = self.bom_items
+        items = items.filter(sub_part__trackable=True)
+
+        return items
+
+    def has_tracked_bom_items(self):
+        """
+        Returns True if this BuildOrder has trackable BomItems
+        """
+
+        return self.tracked_bom_items.count() > 0
+
+    @property
+    def untracked_bom_items(self):
+        """
+        Returns the "non trackable" BOM items for this BuildOrder
+        """
+
+        items = self.bom_items
+        items = items.filter(sub_part__trackable=False)
+
+        return items
+
+    def has_untracked_bom_items(self):
+        """
+        Returns True if this BuildOrder has non trackable BomItems
+        """
+
+        return self.untracked_bom_items.count() > 0
 
     @property
     def remaining(self):
@@ -348,24 +439,32 @@ class Build(MPTTModel):
         if cls.objects.count() == 0:
             return None
 
-        build = cls.objects.last()
+        # Extract the "most recent" build order reference
+        builds = cls.objects.exclude(reference=None)
+        
+        if not builds.exists():
+            return None
+
+        build = builds.last()
         ref = build.reference
 
         if not ref:
             return None
 
-        tries = set()
+        tries = set(ref)
+
+        new_ref = ref
 
         while 1:
-            new_ref = increment(ref)
+            new_ref = increment(new_ref)
 
             if new_ref in tries:
                 # We are potentially stuck in a loop - simply return the original reference
                 return ref
 
+            # Check if the existing build reference exists
             if cls.objects.filter(reference=new_ref).exists():
                 tries.add(new_ref)
-                new_ref = increment(new_ref)
             else:
                 break
 
@@ -386,6 +485,9 @@ class Build(MPTTModel):
         if self.completed < self.quantity:
             return False
 
+        if not self.areUntrackedPartsFullyAllocated():
+            return False
+
         # No issues!
         return True
 
@@ -395,13 +497,16 @@ class Build(MPTTModel):
         Mark this build as complete
         """
 
-        if not self.can_complete:
+        if self.incomplete_count > 0:
             return
 
         self.completion_date = datetime.now().date()
         self.completed_by = user
         self.status = BuildStatus.COMPLETE
         self.save()
+
+        # Remove untracked allocated stock
+        self.subtractUntrackedStock(user)
 
         # Ensure that there are no longer any BuildItem objects
         # which point to thie Build Order
@@ -426,7 +531,7 @@ class Build(MPTTModel):
         self.status = BuildStatus.CANCELLED
         self.save()
 
-    def getAutoAllocations(self, output):
+    def getAutoAllocations(self):
         """
         Return a list of StockItem objects which will be allocated
         using the 'AutoAllocate' function.
@@ -458,15 +563,19 @@ class Build(MPTTModel):
 
             part = bom_item.sub_part
 
+            # If the part is "trackable" it cannot be auto-allocated
+            if part.trackable:
+                continue
+
             # Skip any parts which are already fully allocated
-            if self.isPartFullyAllocated(part, output):
+            if self.isPartFullyAllocated(part, None):
                 continue
 
             # How many parts are required to complete the output?
-            required = self.unallocatedQuantity(part, output)
+            required = self.unallocatedQuantity(part, None)
 
             # Grab a list of stock items which are available
-            stock_items = self.availableStockItems(part, output)
+            stock_items = self.availableStockItems(part, None)
 
             # Ensure that the available stock items are in the correct location
             if self.take_from is not None:
@@ -481,7 +590,6 @@ class Build(MPTTModel):
                 build_items = BuildItem.objects.filter(
                     build=self,
                     stock_item=stock_item,
-                    install_into=output
                 )
 
                 if len(build_items) > 0:
@@ -504,24 +612,45 @@ class Build(MPTTModel):
         return allocations
 
     @transaction.atomic
-    def unallocateStock(self, output=None, part=None):
+    def unallocateOutput(self, output, part=None):
         """
-        Deletes all stock allocations for this build.
-        
-        Args:
-            output: Specify which build output to delete allocations (optional)
-
+        Unallocate all stock which are allocated against the provided "output" (StockItem)
         """
 
-        allocations = BuildItem.objects.filter(build=self.pk)
-
-        if output:
-            allocations = allocations.filter(install_into=output.pk)
+        allocations = BuildItem.objects.filter(
+            build=self,
+            install_into=output
+        )
 
         if part:
             allocations = allocations.filter(stock_item__part=part)
 
-        # Remove all the allocations
+        allocations.delete()
+
+    @transaction.atomic
+    def unallocateUntracked(self, part=None):
+        """
+        Unallocate all "untracked" stock
+        """
+
+        allocations = BuildItem.objects.filter(
+            build=self,
+            install_into=None
+        )
+
+        if part:
+            allocations = allocations.filter(stock_item__part=part)
+
+        allocations.delete()
+
+    @transaction.atomic
+    def unallocateAll(self):
+        """
+        Deletes all stock allocations for this build.
+        """
+        
+        allocations = BuildItem.objects.filter(build=self)
+
         allocations.delete()
 
     @transaction.atomic
@@ -616,13 +745,13 @@ class Build(MPTTModel):
             raise ValidationError(_("Build output does not match Build Order"))
 
         # Unallocate all build items against the output
-        self.unallocateStock(output)
+        self.unallocateOutput(output)
 
         # Remove the build output from the database
         output.delete()
 
     @transaction.atomic
-    def autoAllocate(self, output):
+    def autoAllocate(self):
         """
         Run auto-allocation routine to allocate StockItems to this Build.
 
@@ -639,7 +768,7 @@ class Build(MPTTModel):
         See: getAutoAllocations()
         """
 
-        allocations = self.getAutoAllocations(output)
+        allocations = self.getAutoAllocations()
 
         for item in allocations:
             # Create a new allocation
@@ -647,10 +776,28 @@ class Build(MPTTModel):
                 build=self,
                 stock_item=item['stock_item'],
                 quantity=item['quantity'],
-                install_into=output,
+                install_into=None
             )
 
             build_item.save()
+
+    @transaction.atomic
+    def subtractUntrackedStock(self, user):
+        """
+        Called when the Build is marked as "complete",
+        this function removes the allocated untracked items from stock.
+        """
+
+        items = self.allocated_stock.filter(
+            stock_item__part__trackable=False
+        )
+
+        # Remove stock
+        for item in items:
+            item.complete_allocation(user)
+
+        # Delete allocation
+        items.all().delete()
 
     @transaction.atomic
     def completeBuildOutput(self, output, user, **kwargs):
@@ -663,6 +810,7 @@ class Build(MPTTModel):
 
         # Select the location for the build output
         location = kwargs.get('location', self.destination)
+        status = kwargs.get('status', StockStatus.OK)
 
         # List the allocated BuildItem objects for the given output
         allocated_items = output.items_to_install.all()
@@ -670,9 +818,7 @@ class Build(MPTTModel):
         for build_item in allocated_items:
 
             # TODO: This is VERY SLOW as each deletion from the database takes ~1 second to complete
-            # TODO: Use celery / redis to offload the actual object deletion...
-            # REF: https://www.botreetechnologies.com/blog/implementing-celery-using-django-for-background-task-processing
-            # REF: https://code.tutsplus.com/tutorials/using-celery-with-django-for-background-task-processing--cms-28732
+            # TODO: Use the background worker process to handle this task!
 
             # Complete the allocation of stock for that item
             build_item.complete_allocation(user)
@@ -684,6 +830,7 @@ class Build(MPTTModel):
         output.build = self
         output.is_building = False
         output.location = location
+        output.status = status
 
         output.save()
 
@@ -716,7 +863,7 @@ class Build(MPTTModel):
         if output:
             quantity *= output.quantity
         else:
-            quantity *= self.remaining
+            quantity *= self.quantity
 
         return quantity
 
@@ -744,7 +891,13 @@ class Build(MPTTModel):
 
         allocations = self.allocatedItems(part, output)
 
-        allocated = allocations.aggregate(q=Coalesce(Sum('quantity'), 0))
+        allocated = allocations.aggregate(
+            q=Coalesce(
+                Sum('quantity'),
+                0,
+                output_field=models.DecimalField(),
+            )
+        )
 
         return allocated['q']
 
@@ -765,19 +918,39 @@ class Build(MPTTModel):
 
         return self.unallocatedQuantity(part, output) == 0
 
-    def isFullyAllocated(self, output):
+    def isFullyAllocated(self, output, verbose=False):
         """
         Returns True if the particular build output is fully allocated.
         """
 
-        for bom_item in self.bom_items:
+        # If output is not specified, we are talking about "untracked" items
+        if output is None:
+            bom_items = self.untracked_bom_items
+        else:
+            bom_items = self.tracked_bom_items
+
+        fully_allocated = True
+
+        for bom_item in bom_items:
             part = bom_item.sub_part
 
             if not self.isPartFullyAllocated(part, output):
-                return False
+                fully_allocated = False
+
+                if verbose:
+                    print(f"Part {part} is not fully allocated for output {output}")
+                else:
+                    break
 
         # All parts must be fully allocated!
-        return True
+        return fully_allocated
+
+    def areUntrackedPartsFullyAllocated(self):
+        """
+        Returns True if the un-tracked parts are fully allocated for this BuildOrder
+        """
+
+        return self.isFullyAllocated(None)
 
     def allocatedParts(self, output):
         """
@@ -786,7 +959,13 @@ class Build(MPTTModel):
 
         allocated = []
 
-        for bom_item in self.bom_items:
+        # If output is not specified, we are talking about "untracked" items
+        if output is None:
+            bom_items = self.untracked_bom_items
+        else:
+            bom_items = self.tracked_bom_items
+
+        for bom_item in bom_items:
             part = bom_item.sub_part
 
             if self.isPartFullyAllocated(part, output):
@@ -801,7 +980,13 @@ class Build(MPTTModel):
 
         unallocated = []
 
-        for bom_item in self.bom_items:
+        # If output is not specified, we are talking about "untracked" items
+        if output is None:
+            bom_items = self.untracked_bom_items
+        else:
+            bom_items = self.tracked_bom_items
+
+        for bom_item in bom_items:
             part = bom_item.sub_part
 
             if not self.isPartFullyAllocated(part, output):
@@ -811,11 +996,25 @@ class Build(MPTTModel):
 
     @property
     def required_parts(self):
-        """ Returns a dict of parts required to build this part (BOM) """
+        """ Returns a list of parts required to build this part (BOM) """
         parts = []
 
-        for item in self.part.bom_items.all().prefetch_related('sub_part'):
+        for item in self.bom_items:
             parts.append(item.sub_part)
+
+        return parts
+
+    @property
+    def required_parts_to_complete_build(self):
+        """ Returns a list of parts required to complete the full build """
+        parts = []
+
+        for bom_item in self.bom_items:
+            # Get remaining quantity needed
+            required_quantity_to_complete_build = self.remaining * bom_item.quantity
+            # Compare to net stock
+            if bom_item.sub_part.net_stock < required_quantity_to_complete_build:
+                parts.append(bom_item.sub_part)
 
         return parts
 
@@ -951,20 +1150,22 @@ class BuildItem(models.Model):
 
         errors = {}
 
-        if not self.install_into:
-            raise ValidationError(_('Build item must specify a build output'))
-
         try:
+
+            # If the 'part' is trackable, then the 'install_into' field must be set!
+            if self.stock_item.part and self.stock_item.part.trackable and not self.install_into:
+                raise ValidationError(_('Build item must specify a build output, as master part is marked as trackable'))
+
             # Allocated part must be in the BOM for the master part
             if self.stock_item.part not in self.build.part.getRequiredParts(recursive=False):
-                errors['stock_item'] = [_("Selected stock item not found in BOM for part '{p}'".format(p=self.build.part.full_name))]
+                errors['stock_item'] = [_("Selected stock item not found in BOM for part '{p}'").format(p=self.build.part.full_name)]
             
             # Allocated quantity cannot exceed available stock quantity
             if self.quantity > self.stock_item.quantity:
-                errors['quantity'] = [_("Allocated quantity ({n}) must not exceed available quantity ({q})".format(
+                errors['quantity'] = [_("Allocated quantity ({n}) must not exceed available quantity ({q})").format(
                     n=normalize(self.quantity),
                     q=normalize(self.stock_item.quantity)
-                ))]
+                )]
 
             # Allocated quantity cannot cause the stock item to be over-allocated
             if self.stock_item.quantity - self.stock_item.allocation_count() + self.quantity < self.quantity:
@@ -1016,6 +1217,7 @@ class BuildItem(models.Model):
         Build,
         on_delete=models.CASCADE,
         related_name='allocated_stock',
+        verbose_name=_('Build'),
         help_text=_('Build to allocate parts')
     )
 
@@ -1023,6 +1225,7 @@ class BuildItem(models.Model):
         'stock.StockItem',
         on_delete=models.CASCADE,
         related_name='allocations',
+        verbose_name=_('Stock Item'),
         help_text=_('Source stock item'),
         limit_choices_to={
             'sales_order': None,
@@ -1035,6 +1238,7 @@ class BuildItem(models.Model):
         max_digits=15,
         default=1,
         validators=[MinValueValidator(0)],
+        verbose_name=_('Quantity'),
         help_text=_('Stock quantity to allocate to build')
     )
 
@@ -1043,6 +1247,7 @@ class BuildItem(models.Model):
         on_delete=models.SET_NULL,
         blank=True, null=True,
         related_name='items_to_install',
+        verbose_name=_('Install into'),
         help_text=_('Destination stock item'),
         limit_choices_to={
             'is_building': True,

@@ -2,18 +2,19 @@
 {% load static %}
 {% load i18n %}
 
+{% block menubar %}
+{% include "company/supplier_part_navbar.html" with tab='orders' %}
+{% endblock %}
+
+{% block heading %}
+{% trans "Supplier Part Orders" %}
+{% endblock %}
+
 {% block details %}
-
-{% include "company/supplier_part_tabs.html" with tab='orders' %}
-
-<h4>{% trans "Supplier Part Orders" %}</h4>
-
-<hr>
-
 {% if roles.purchase_order.add %}
 <div id='button-bar'>
     <div class='btn-group'>
-        <button class='btn btn-primary' type='button' id='order-part2' title='Order part'>
+        <button class='btn btn-primary' type='button' id='order-part2' title='{% trans "Order part" %}'>
             <span class='fas fa-shopping-cart'></span> {% trans "Order Part" %}</button>
     </div>
 </div>

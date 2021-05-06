@@ -6,14 +6,21 @@ from django.conf.urls import url, include
 
 from . import views
 
-# URL list for web interface
-stock_location_detail_urls = [
-    url(r'^edit/?', views.StockLocationEdit.as_view(), name='stock-location-edit'),
-    url(r'^delete/?', views.StockLocationDelete.as_view(), name='stock-location-delete'),
-    url(r'^qr_code/?', views.StockLocationQRCode.as_view(), name='stock-location-qr'),
+location_urls = [
 
-    # Anything else
-    url('^.*$', views.StockLocationDetail.as_view(), name='stock-location-detail'),
+    url(r'^new/', views.StockLocationCreate.as_view(), name='stock-location-create'),
+
+    url(r'^(?P<pk>\d+)/', include([
+        url(r'^edit/?', views.StockLocationEdit.as_view(), name='stock-location-edit'),
+        url(r'^delete/?', views.StockLocationDelete.as_view(), name='stock-location-delete'),
+        url(r'^qr_code/?', views.StockLocationQRCode.as_view(), name='stock-location-qr'),
+        
+        url(r'sublocation/', views.StockLocationDetail.as_view(template_name='stock/sublocation.html'), name='stock-location-sublocation'),
+
+        # Anything else
+        url('^.*$', views.StockLocationDetail.as_view(), name='stock-location-detail'),
+    ])),
+
 ]
 
 stock_item_detail_urls = [
@@ -28,9 +35,6 @@ stock_item_detail_urls = [
     url(r'^install/', views.StockItemInstall.as_view(), name='stock-item-install'),
 
     url(r'^add_tracking/', views.StockItemTrackingCreate.as_view(), name='stock-tracking-create'),
-
-    url(r'^test-report-select/', views.StockItemTestReportSelect.as_view(), name='stock-item-test-report-select'),
-    url(r'^label-select/', views.StockItemSelectLabels.as_view(), name='stock-item-label-select'),
 
     url(r'^test/', views.StockItemDetail.as_view(template_name='stock/item_tests.html'), name='stock-item-test-results'),
     url(r'^children/', views.StockItemDetail.as_view(template_name='stock/item_childs.html'), name='stock-item-children'),
@@ -48,23 +52,15 @@ stock_tracking_urls = [
 
     # delete
     url(r'^(?P<pk>\d+)/delete', views.StockItemTrackingDelete.as_view(), name='stock-tracking-delete'),
-
-    # list
-    url('^.*$', views.StockTrackingIndex.as_view(), name='stock-tracking-list')
 ]
 
 stock_urls = [
     # Stock location
-    url(r'^location/(?P<pk>\d+)/', include(stock_location_detail_urls)),
-
-    url(r'^location/new/', views.StockLocationCreate.as_view(), name='stock-location-create'),
+    url(r'^location/', include(location_urls)),
 
     url(r'^item/new/?', views.StockItemCreate.as_view(), name='stock-item-create'),
 
     url(r'^item/uninstall/', views.StockItemUninstall.as_view(), name='stock-item-uninstall'),
-
-    url(r'^item/test-report-download/', views.StockItemTestReportDownload.as_view(), name='stock-item-test-report-download'),
-    url(r'^item/print-stock-labels/', views.StockItemPrintLabels.as_view(), name='stock-item-print-labels'),
 
     # URLs for StockItem attachments
     url(r'^item/attachment/', include([
@@ -89,6 +85,8 @@ stock_urls = [
 
     # Individual stock items
     url(r'^item/(?P<pk>\d+)/', include(stock_item_detail_urls)),
+
+    url(r'^sublocations/', views.StockIndex.as_view(template_name='stock/sublocation.html'), name='stock-sublocations'),
 
     url(r'^.*$', views.StockIndex.as_view(), name='stock-index'),
 ]

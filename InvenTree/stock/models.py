@@ -9,7 +9,7 @@ from __future__ import unicode_literals
 import os
 
 from django.utils.translation import gettext_lazy as _
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError, FieldError
 from django.urls import reverse
 
 from django.db import models, transaction
@@ -32,10 +32,13 @@ from InvenTree import helpers
 
 import common.models
 import report.models
+import label.models
 
 from InvenTree.status_codes import StockStatus
 from InvenTree.models import InvenTreeTree, InvenTreeAttachment
 from InvenTree.fields import InvenTreeURLField
+
+from users.models import Owner
 
 from company import models as CompanyModels
 from part import models as PartModels
@@ -46,6 +49,11 @@ class StockLocation(InvenTreeTree):
     A "StockLocation" can be considered a warehouse, or storage location
     Stock locations can be heirarchical as required
     """
+
+    owner = models.ForeignKey(Owner, on_delete=models.SET_NULL, blank=True, null=True,
+                              verbose_name=_('Owner'),
+                              help_text=_('Select Owner'),
+                              related_name='stock_locations')
 
     def get_absolute_url(self):
         return reverse('stock-location-detail', kwargs={'pk': self.id})
@@ -62,6 +70,13 @@ class StockLocation(InvenTreeTree):
             },
             **kwargs
         )
+
+    @property
+    def barcode(self):
+        """
+        Brief payload data (e.g. for labels)
+        """
+        return self.format_barcode(brief=True)
 
     def get_stock_items(self, cascade=True):
         """ Return a queryset for all stock items under this category.
@@ -141,6 +156,7 @@ class StockItem(MPTTModel):
         infinite: If True this StockItem can never be exhausted
         sales_order: Link to a SalesOrder object (if the StockItem has been assigned to a SalesOrder)
         purchase_price: The unit purchase price for this StockItem - this is the unit price at time of purchase (if this item was purchased from an external supplier)
+        packaging: Description of how the StockItem is packaged (e.g. "reel", "loose", "tape" etc)
     """
 
     # A Query filter which will be re-used in multiple places to determine if a StockItem is actually "in stock"
@@ -181,11 +197,14 @@ class StockItem(MPTTModel):
         super(StockItem, self).save(*args, **kwargs)
 
         if add_note:
+
+            note = _('Created new stock item for {part}').format(part=str(self.part))
+
             # This StockItem is being saved for the first time
             self.addTransactionNote(
                 _('Created stock item'),
                 user,
-                notes="Created new stock item for part '{p}'".format(p=str(self.part)),
+                note,
                 system=True
             )
 
@@ -335,10 +354,19 @@ class StockItem(MPTTModel):
             "stockitem",
             self.id,
             {
+                "request": kwargs.get('request', None),
+                "item_url": reverse('stock-item-detail', kwargs={'pk': self.id}),
                 "url": reverse('api-stock-detail', kwargs={'pk': self.id}),
             },
             **kwargs
         )
+
+    @property
+    def barcode(self):
+        """
+        Brief payload data (e.g. for labels)
+        """
+        return self.format_barcode(brief=True)
 
     uid = models.CharField(blank=True, max_length=128, help_text=("Unique identifier field"))
 
@@ -371,6 +399,13 @@ class StockItem(MPTTModel):
         related_name='stock_items',
         blank=True, null=True,
         help_text=_('Where is this stock item located?')
+    )
+
+    packaging = models.CharField(
+        max_length=50,
+        blank=True, null=True,
+        verbose_name=_('Packaging'),
+        help_text=_('Packaging this stock item is stored in')
     )
 
     belongs_to = models.ForeignKey(
@@ -461,7 +496,7 @@ class StockItem(MPTTModel):
 
     review_needed = models.BooleanField(default=False)
 
-    delete_on_deplete = models.BooleanField(default=True, help_text=_('Delete this Stock Item when stock is depleted'))
+    delete_on_deplete = models.BooleanField(default=True, verbose_name=_('Delete on deplete'), help_text=_('Delete this Stock Item when stock is depleted'))
 
     status = models.PositiveIntegerField(
         default=StockStatus.OK,
@@ -483,6 +518,11 @@ class StockItem(MPTTModel):
         verbose_name=_('Purchase Price'),
         help_text=_('Single unit purchase price at time of purchase'),
     )
+
+    owner = models.ForeignKey(Owner, on_delete=models.SET_NULL, blank=True, null=True,
+                              verbose_name=_('Owner'),
+                              help_text=_('Select Owner'),
+                              related_name='stock_items')
 
     def is_stale(self):
         """
@@ -583,7 +623,7 @@ class StockItem(MPTTModel):
         item.addTransactionNote(
             _("Assigned to Customer"),
             user,
-            notes=_("Manually assigned to customer") + " " + customer.name,
+            notes=_("Manually assigned to customer {name}").format(name=customer.name),
             system=True
         )
 
@@ -596,14 +636,15 @@ class StockItem(MPTTModel):
         """
 
         self.addTransactionNote(
-            _("Returned from customer") + " " + self.customer.name,
+            _("Returned from customer {name}").format(name=self.customer.name),
             user,
-            notes=_("Returned to location") + " " + location.name,
+            notes=_("Returned to location {loc}").format(loc=location.name),
             system=True
         )
 
         self.customer = None
         self.location = location
+        self.sales_order = None
 
         self.save()
 
@@ -681,6 +722,41 @@ class StockItem(MPTTModel):
 
         return True
 
+    def get_installed_items(self, cascade=False):
+        """
+        Return all stock items which are *installed* in this one!
+
+        Args:
+            cascade - Include items which are installed in items which are installed in items
+
+        Note: This function is recursive, and may result in a number of database hits!
+        """
+
+        installed = set()
+
+        items = StockItem.objects.filter(belongs_to=self)
+
+        for item in items:
+            
+            # Prevent duplication or recursion
+            if item == self or item in installed:
+                continue
+
+            installed.add(item)
+
+            if cascade:
+                sub_items = item.get_installed_items(cascade=True)
+
+                for sub_item in sub_items:
+
+                    # Prevent recursion
+                    if sub_item == self or sub_item in installed:
+                        continue
+
+                    installed.add(sub_item)
+
+        return installed
+
     def installedItemCount(self):
         """
         Return the number of stock items installed inside this one.
@@ -723,7 +799,7 @@ class StockItem(MPTTModel):
 
         # Add a transaction note to the other item
         stock_item.addTransactionNote(
-            _('Installed into stock item') + ' ' + str(self.pk),
+            _('Installed into stock item {pk}').format(str(self.pk)),
             user,
             notes=notes,
             url=self.get_absolute_url()
@@ -731,7 +807,7 @@ class StockItem(MPTTModel):
 
         # Add a transaction note to this item
         self.addTransactionNote(
-            _('Installed stock item') + ' ' + str(stock_item.pk),
+            _('Installed stock item {pk}').format(str(stock_item.pk)),
             user, notes=notes,
             url=stock_item.get_absolute_url()
         )
@@ -755,7 +831,7 @@ class StockItem(MPTTModel):
 
         # Add a transaction note to the parent item
         self.belongs_to.addTransactionNote(
-            _("Uninstalled stock item") + ' ' + str(self.pk),
+            _("Uninstalled stock item {pk}").format(pk=str(self.pk)),
             user,
             notes=notes,
             url=self.get_absolute_url(),
@@ -774,7 +850,7 @@ class StockItem(MPTTModel):
 
         # Add a transaction note!
         self.addTransactionNote(
-            _('Uninstalled into location') + ' ' + str(location),
+            _('Uninstalled into location {loc}').formaT(loc=str(location)),
             user,
             notes=notes,
             url=url
@@ -805,6 +881,27 @@ class StockItem(MPTTModel):
         query = query.filter(StockItem.IN_STOCK_FILTER)
 
         return query.exists()
+
+    @property
+    def can_adjust_location(self):
+        """
+        Returns True if the stock location can be "adjusted" for this part
+
+        Cannot be adjusted if:
+        - Has been delivered to a customer
+        - Has been installed inside another StockItem
+        """
+
+        if self.customer is not None:
+            return False
+
+        if self.belongs_to is not None:
+            return False
+
+        if self.sales_order is not None:
+            return False
+
+        return True
 
     @property
     def tracking_info_count(self):
@@ -866,7 +963,7 @@ class StockItem(MPTTModel):
             raise ValidationError({"quantity": _("Quantity must be greater than zero")})
 
         if quantity > self.quantity:
-            raise ValidationError({"quantity": _("Quantity must not exceed available stock quantity ({n})".format(n=self.quantity))})
+            raise ValidationError({"quantity": _("Quantity must not exceed available stock quantity ({n})").format(n=self.quantity)})
 
         if not type(serials) in [list, tuple]:
             raise ValidationError({"serial_numbers": _("Serial numbers must be a list of integers")})
@@ -879,7 +976,7 @@ class StockItem(MPTTModel):
 
         if len(existing) > 0:
             exists = ','.join([str(x) for x in existing])
-            raise ValidationError({"serial_numbers": _("Serial numbers already exist") + ': ' + exists})
+            raise ValidationError({"serial_numbers": _("Serial numbers already exist: {exists}").format(exists=exists)})
 
         # Create a new stock item for each unique serial number
         for serial in serials:
@@ -907,7 +1004,7 @@ class StockItem(MPTTModel):
             new_item.addTransactionNote(_('Add serial number'), user, notes=notes)
 
         # Remove the equivalent number of items
-        self.take_stock(quantity, user, notes=_('Serialized {n} items'.format(n=quantity)))
+        self.take_stock(quantity, user, notes=_('Serialized {n} items').format(n=quantity))
 
     @transaction.atomic
     def copyHistoryFrom(self, other):
@@ -985,12 +1082,17 @@ class StockItem(MPTTModel):
 
         # Add a new tracking item for the new stock item
         new_stock.addTransactionNote(
-            "Split from existing stock",
+            _("Split from existing stock"),
             user,
-            "Split {n} from existing stock item".format(n=quantity))
+            _('Split {n} items').format(n=helpers.normalize(quantity))
+        )
 
         # Remove the specified quantity from THIS stock item
-        self.take_stock(quantity, user, 'Split {n} items into new stock item'.format(n=quantity))
+        self.take_stock(
+            quantity,
+            user,
+            f"{_('Split')} {quantity} {_('items into new stock item')}"
+        )
 
         # Return a copy of the "new" stock item
         return new_stock
@@ -1039,10 +1141,10 @@ class StockItem(MPTTModel):
 
             return True
 
-        msg = "Moved to {loc}".format(loc=str(location))
-
         if self.location:
-            msg += " (from {loc})".format(loc=str(self.location))
+            msg = _("Moved to {loc_new} (from {loc_old})").format(loc_new=str(location), loc_old=str(self.location))
+        else:
+            msg = _('Moved to {loc_new}').format(loc_new=str(location))
 
         self.location = location
 
@@ -1110,10 +1212,14 @@ class StockItem(MPTTModel):
 
         if self.updateQuantity(count):
 
-            self.addTransactionNote('Stocktake - counted {n} items'.format(n=helpers.normalize(count)),
-                                    user,
-                                    notes=notes,
-                                    system=True)
+            text = _('Counted {n} items').format(n=helpers.normalize(count))
+
+            self.addTransactionNote(
+                text,
+                user,
+                notes=notes,
+                system=True
+            )
 
         return True
 
@@ -1138,11 +1244,15 @@ class StockItem(MPTTModel):
             return False
 
         if self.updateQuantity(self.quantity + quantity):
-            
-            self.addTransactionNote('Added {n} items to stock'.format(n=helpers.normalize(quantity)),
-                                    user,
-                                    notes=notes,
-                                    system=True)
+
+            text = _('Added {n} items').format(n=helpers.normalize(quantity))
+
+            self.addTransactionNote(
+                text,
+                user,
+                notes=notes,
+                system=True
+            )
 
         return True
 
@@ -1165,7 +1275,9 @@ class StockItem(MPTTModel):
 
         if self.updateQuantity(self.quantity - quantity):
 
-            self.addTransactionNote('Removed {n} items from stock'.format(n=helpers.normalize(quantity)),
+            text = _('Removed {n1} items').format(n1=helpers.normalize(quantity))
+
+            self.addTransactionNote(text,
                                     user,
                                     notes=notes,
                                     system=True)
@@ -1239,6 +1351,9 @@ class StockItem(MPTTModel):
         as all named tests are accessible.
         """
 
+        # Do we wish to include test results from installed items?
+        include_installed = kwargs.pop('include_installed', False)
+
         # Filter results by "date", so that newer results
         # will override older ones.
         results = self.getTestResults(**kwargs).order_by('date')
@@ -1248,6 +1363,20 @@ class StockItem(MPTTModel):
         for result in results:
             key = helpers.generateTestKey(result.test)
             result_map[key] = result
+
+        # Do we wish to "cascade" and include test results from installed stock items?
+        cascade = kwargs.get('cascade', False)
+
+        if include_installed:
+            installed_items = self.get_installed_items(cascade=cascade)
+
+            for item in installed_items:
+                item_results = item.testResultMap()
+
+                for key in item_results.keys():
+                    # Results from sub items should not override master ones
+                    if key not in result_map.keys():
+                        result_map[key] = item_results[key]
 
         return result_map
 
@@ -1328,10 +1457,13 @@ class StockItem(MPTTModel):
 
         for test_report in report.models.TestReport.objects.filter(enabled=True):
 
-            filters = helpers.validateFilterString(test_report.filters)
-
-            if item_query.filter(**filters).exists():
-                reports.append(test_report)
+            # Attempt to validate report filter (skip if invalid)
+            try:
+                filters = helpers.validateFilterString(test_report.filters)
+                if item_query.filter(**filters).exists():
+                    reports.append(test_report)
+            except (ValidationError, FieldError):
+                continue
 
         return reports
 
@@ -1343,14 +1475,34 @@ class StockItem(MPTTModel):
 
         return len(self.available_test_reports()) > 0
 
+    def available_labels(self):
+        """
+        Return a list of Label objects which match this StockItem
+        """
+
+        labels = []
+
+        item_query = StockItem.objects.filter(pk=self.pk)
+
+        for lbl in label.models.StockItemLabel.objects.filter(enabled=True):
+
+            try:
+                filters = helpers.validateFilterString(lbl.filters)
+
+                if item_query.filter(**filters).exists():
+                    labels.append(lbl)
+            except (ValidationError, FieldError):
+                continue
+
+        return labels
+
     @property
     def has_labels(self):
         """
         Return True if there are any label templates available for this stock item
         """
 
-        # TODO - Implement this
-        return True
+        return len(self.available_labels()) > 0
 
 
 @receiver(pre_delete, sender=StockItem, dispatch_uid='stock_item_pre_delete_log')
@@ -1407,17 +1559,17 @@ class StockItemTracking(models.Model):
 
     date = models.DateTimeField(auto_now_add=True, editable=False)
 
-    title = models.CharField(blank=False, max_length=250, help_text=_('Tracking entry title'))
+    title = models.CharField(blank=False, max_length=250, verbose_name=_('Title'), help_text=_('Tracking entry title'))
 
-    notes = models.CharField(blank=True, max_length=512, help_text=_('Entry notes'))
+    notes = models.CharField(blank=True, max_length=512, verbose_name=_('Notes'), help_text=_('Entry notes'))
 
-    link = InvenTreeURLField(blank=True, help_text=_('Link to external page for further information'))
+    link = InvenTreeURLField(blank=True, verbose_name=_('Link'), help_text=_('Link to external page for further information'))
 
     user = models.ForeignKey(User, on_delete=models.SET_NULL, blank=True, null=True)
 
     system = models.BooleanField(default=False)
 
-    quantity = models.DecimalField(max_digits=15, decimal_places=5, validators=[MinValueValidator(0)], default=1)
+    quantity = models.DecimalField(max_digits=15, decimal_places=5, validators=[MinValueValidator(0)], default=1, verbose_name=_('Quantity'))
 
     # TODO
     # image = models.ImageField(upload_to=func, max_length=255, null=True, blank=True)

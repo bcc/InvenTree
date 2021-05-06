@@ -1,4 +1,4 @@
-from django.utils.translation import ugettext as _
+from django.utils.translation import ugettext_lazy as _
 
 
 class StatusCode:
@@ -61,6 +61,14 @@ class StatusCode:
     @classmethod
     def items(cls):
         return cls.options.items()
+
+    @classmethod
+    def keys(cls):
+        return cls.options.keys()
+
+    @classmethod
+    def labels(cls):
+        return cls.options.values()
 
     @classmethod
     def label(cls, value):

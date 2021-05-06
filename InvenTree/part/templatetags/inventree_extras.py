@@ -4,6 +4,9 @@ over and above the built-in Django tags.
 import os
 
 from django import template
+from django.urls import reverse
+from django.utils.safestring import mark_safe
+from django.templatetags.static import StaticNode
 from InvenTree import version, settings
 
 import InvenTree.helpers
@@ -72,6 +75,12 @@ def inventree_instance_name(*args, **kwargs):
 
 
 @register.simple_tag()
+def inventree_title(*args, **kwargs):
+    """ Return the title for the current instance - respecting the settings """
+    return version.inventreeInstanceTitle()
+
+
+@register.simple_tag()
 def inventree_version(*args, **kwargs):
     """ Return InvenTree version string """
     return version.inventreeVersion()
@@ -105,6 +114,12 @@ def inventree_github_url(*args, **kwargs):
 def inventree_docs_url(*args, **kwargs):
     """ Return URL for InvenTree documenation site """
     return "https://inventree.readthedocs.io/"
+
+
+@register.simple_tag()
+def inventree_credits_url(*args, **kwargs):
+    """ Return URL for InvenTree credits site """
+    return "https://inventree.readthedocs.io/en/latest/credits/"
 
 
 @register.simple_tag()
@@ -145,3 +160,58 @@ def get_color_theme_css(username):
     inventree_css_static_url = os.path.join(settings.STATIC_URL, inventree_css_sheet)
 
     return inventree_css_static_url
+
+
+@register.simple_tag()
+def authorized_owners(group):
+    """ Return authorized owners """
+
+    owners = []
+
+    try:
+        for owner in group.get_related_owners(include_group=True):
+            owners.append(owner.owner)
+    except AttributeError:
+        # group is None
+        pass
+    except TypeError:
+        # group.get_users returns None
+        pass
+    
+    return owners
+
+
+@register.simple_tag()
+def object_link(url_name, pk, ref):
+    """ Return highlighted link to object """
+
+    ref_url = reverse(url_name, kwargs={'pk': pk})
+    return mark_safe('<b><a href="{}">{}</a></b>'.format(ref_url, ref))
+
+
+class I18nStaticNode(StaticNode):
+    """
+    custom StaticNode
+    replaces a variable named *lng* in the path with the current language
+    """
+    def render(self, context):
+        self.path.var = self.path.var.format(lng=context.request.LANGUAGE_CODE)
+        ret = super().render(context)
+        return ret
+
+
+@register.tag('i18n_static')
+def do_i18n_static(parser, token):
+    """
+    Overrides normal static, adds language - lookup for prerenderd files #1485
+
+    usage (like static):
+    {% i18n_static path [as varname] %}
+    """
+    bits = token.split_contents()
+    loc_name = settings.STATICFILES_I18_PREFIX
+
+    # change path to called ressource
+    bits[1] = f"'{loc_name}/{{lng}}.{bits[1][1:-1]}'"
+    token.contents = ' '.join(bits)
+    return I18nStaticNode.handle_token(parser, token)

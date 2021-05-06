@@ -7,7 +7,7 @@ from __future__ import unicode_literals
 
 import logging
 
-from django.utils.translation import ugettext as _
+from django.utils.translation import ugettext_lazy as _
 from django.http import JsonResponse
 
 from django_filters.rest_framework import DjangoFilterBackend
@@ -18,12 +18,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .views import AjaxView
-from .version import inventreeVersion, inventreeInstanceName
+from .version import inventreeVersion, inventreeApiVersion, inventreeInstanceName
+from .status import is_worker_running
 
 from plugins import plugins as inventree_plugins
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("inventree")
 
 
 logger.info("Loading action plugins...")
@@ -43,9 +44,28 @@ class InfoView(AjaxView):
             'server': 'InvenTree',
             'version': inventreeVersion(),
             'instance': inventreeInstanceName(),
+            'apiVersion': inventreeApiVersion(),
+            'worker_running': is_worker_running(),
         }
 
         return JsonResponse(data)
+
+
+class NotFoundView(AjaxView):
+    """
+    Simple JSON view when accessing an invalid API view.
+    """
+
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, *args, **kwargs):
+
+        data = {
+            'details': _('API endpoint not found'),
+            'url': request.build_absolute_uri(),
+        }
+
+        return JsonResponse(data, status=404)
 
 
 class AttachmentMixin:

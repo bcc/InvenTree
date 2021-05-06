@@ -3,35 +3,63 @@
 {% load static %}
 {% load i18n %}
 
+{% block menubar %}
+<!-- Custom menubar code goes here -->
+{% endblock %}
+
 {% block content %}
 
-<div class='row'>
-    <div class='col-sm-6'>
-        <div class='media-left'>
-            {% block thumbnail %}
-            <!-- Image goes here -->
-            {% endblock %}
+{% block header_panel %}
+<div class='panel panel-default panel-inventree'>
+    
+    {% block header_pre_content %}
+    {% endblock %}
+
+    <div class='row'>
+        <div class='col-sm-6'>
+            <div class='media-left'>
+                {% block thumbnail %}
+                <!-- Image goes here -->
+                {% endblock %}
+            </div>
+            <div class='media-body'>
+                {% block page_data %}
+                <!-- Data next to image goes here -->
+                {% endblock %}
+            </div>
         </div>
-        <div class='media-body'>
-            {% block page_data %}
-            <!-- Data next to image goes here -->
+        <div class='col-sm-6'>
+            {% block page_details %}
+            <!-- Right column data goes here -->
             {% endblock %}
         </div>
     </div>
-    <div class='col-sm-6'>
-        {% block page_details %}
-        <!-- Right column data goes here -->
+
+    {% block header_post_content %}
+    {% endblock %}
+
+</div>
+{% endblock %}
+
+{% block content_panels %}
+<div class='panel panel-default panel-inventree'>
+    <div class='panel-heading'>
+        <h4>
+            {% block heading %}
+            <!-- Heading goes here -->
+            {% endblock %}
+        </h4>
+    </div>
+
+    {% block details_panel %}
+    <div class='panel-content'>
+        {% block details %}
+        <!-- Particular page detail views go here -->
         {% endblock %}
     </div>
-</div>
-
-<hr>
-
-<div class='container-fluid'>
-    {% block details %}
-    <!-- Particular page detail views go here -->
     {% endblock %}
 </div>
+{% endblock %}
 
 {% endblock %}
 

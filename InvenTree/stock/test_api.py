@@ -7,20 +7,18 @@ from __future__ import unicode_literals
 
 from datetime import datetime, timedelta
 
-from rest_framework.test import APITestCase
 from rest_framework import status
 from django.urls import reverse
-from django.contrib.auth import get_user_model
 
-from InvenTree.helpers import addUserPermissions
 from InvenTree.status_codes import StockStatus
+from InvenTree.api_tester import InvenTreeAPITestCase
 
 from common.models import InvenTreeSetting
 
 from .models import StockItem, StockLocation
 
 
-class StockAPITestCase(APITestCase):
+class StockAPITestCase(InvenTreeAPITestCase):
 
     fixtures = [
         'category',
@@ -32,34 +30,16 @@ class StockAPITestCase(APITestCase):
         'stock_tests',
     ]
 
+    roles = [
+        'stock.change',
+        'stock.add',
+        'stock_location.change',
+        'stock_location.add',
+    ]
+
     def setUp(self):
-        # Create a user for auth
-        user = get_user_model()
         
-        self.user = user.objects.create_user('testuser', 'test@testing.com', 'password')
-
-        self.user.is_staff = True
-        self.user.save()
-
-        # Add the necessary permissions to the user
-        perms = [
-            'view_stockitemtestresult',
-            'change_stockitemtestresult',
-            'add_stockitemtestresult',
-            'add_stocklocation',
-            'change_stocklocation',
-            'add_stockitem',
-            'change_stockitem',
-        ]
-
-        addUserPermissions(self.user, perms)
-
-        self.client.login(username='testuser', password='password')
-
-    def doPost(self, url, data={}):
-        response = self.client.post(url, data=data, format='json')
-
-        return response
+        super().setUp()
 
 
 class StockLocationTest(StockAPITestCase):
@@ -117,7 +97,7 @@ class StockItemListTest(StockAPITestCase):
 
         response = self.get_stock()
 
-        self.assertEqual(len(response), 19)
+        self.assertEqual(len(response), 20)
 
     def test_filter_by_part(self):
         """
@@ -126,7 +106,7 @@ class StockItemListTest(StockAPITestCase):
 
         response = self.get_stock(part=25)
         
-        self.assertEqual(len(response), 7)
+        self.assertEqual(len(response), 8)
 
         response = self.get_stock(part=10004)
 
@@ -166,7 +146,7 @@ class StockItemListTest(StockAPITestCase):
         self.assertEqual(len(response), 1)
 
         response = self.get_stock(depleted=0)
-        self.assertEqual(len(response), 18)
+        self.assertEqual(len(response), 19)
 
     def test_filter_by_in_stock(self):
         """
@@ -174,7 +154,7 @@ class StockItemListTest(StockAPITestCase):
         """
 
         response = self.get_stock(in_stock=1)
-        self.assertEqual(len(response), 16)
+        self.assertEqual(len(response), 17)
 
         response = self.get_stock(in_stock=0)
         self.assertEqual(len(response), 3)
@@ -185,7 +165,7 @@ class StockItemListTest(StockAPITestCase):
         """
 
         codes = {
-            StockStatus.OK: 17,
+            StockStatus.OK: 18,
             StockStatus.DESTROYED: 1,
             StockStatus.LOST: 1,
             StockStatus.DAMAGED: 0,
@@ -218,7 +198,7 @@ class StockItemListTest(StockAPITestCase):
             self.assertIsNotNone(item['serial'])
 
         response = self.get_stock(serialized=0)
-        self.assertEqual(len(response), 7)
+        self.assertEqual(len(response), 8)
 
         for item in response:
             self.assertIsNone(item['serial'])
@@ -230,7 +210,10 @@ class StockItemListTest(StockAPITestCase):
 
         # First, we can assume that the 'stock expiry' feature is disabled
         response = self.get_stock(expired=1)
-        self.assertEqual(len(response), 19)
+        self.assertEqual(len(response), 20)
+
+        self.user.is_staff = True
+        self.user.save()
 
         # Now, ensure that the expiry date feature is enabled!
         InvenTreeSetting.set_setting('STOCK_ENABLE_EXPIRY', True, self.user)
@@ -242,7 +225,7 @@ class StockItemListTest(StockAPITestCase):
             self.assertTrue(item['expired'])
 
         response = self.get_stock(expired=0)
-        self.assertEqual(len(response), 18)
+        self.assertEqual(len(response), 19)
 
         for item in response:
             self.assertFalse(item['expired'])
@@ -259,7 +242,20 @@ class StockItemListTest(StockAPITestCase):
         self.assertEqual(len(response), 4)
 
         response = self.get_stock(expired=0)
-        self.assertEqual(len(response), 15)
+        self.assertEqual(len(response), 16)
+
+    def test_paginate(self):
+        """
+        Test that we can paginate results correctly
+        """
+
+        for n in [1, 5, 10]:
+            response = self.get_stock(limit=n)
+
+            self.assertIn('count', response)
+            self.assertIn('results', response)
+
+            self.assertEqual(len(response['results']), n)
 
 
 class StockItemTest(StockAPITestCase):
@@ -449,7 +445,7 @@ class StocktakeTest(StockAPITestCase):
             data = {}
 
             # POST with a valid action
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertContains(response, "must contain list", status_code=status.HTTP_400_BAD_REQUEST)
 
             data['items'] = [{
@@ -457,7 +453,7 @@ class StocktakeTest(StockAPITestCase):
             }]
 
             # POST without a PK
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertContains(response, 'must contain a valid pk', status_code=status.HTTP_400_BAD_REQUEST)
 
             # POST with a PK but no quantity
@@ -465,14 +461,14 @@ class StocktakeTest(StockAPITestCase):
                 'pk': 10
             }]
             
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertContains(response, 'must contain a valid pk', status_code=status.HTTP_400_BAD_REQUEST)
 
             data['items'] = [{
                 'pk': 1234
             }]
 
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertContains(response, 'must contain a valid quantity', status_code=status.HTTP_400_BAD_REQUEST)
 
             data['items'] = [{
@@ -480,7 +476,7 @@ class StocktakeTest(StockAPITestCase):
                 'quantity': '10x0d'
             }]
 
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertContains(response, 'must contain a valid quantity', status_code=status.HTTP_400_BAD_REQUEST)
             
             data['items'] = [{
@@ -488,7 +484,7 @@ class StocktakeTest(StockAPITestCase):
                 'quantity': "-1.234"
             }]
             
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertContains(response, 'must not be less than zero', status_code=status.HTTP_400_BAD_REQUEST)
 
             # Test with a single item
@@ -499,7 +495,7 @@ class StocktakeTest(StockAPITestCase):
                 }
             }
 
-            response = self.doPost(url, data)
+            response = self.post(url, data)
             self.assertEqual(response.status_code, status.HTTP_200_OK)
 
     def test_transfer(self):
@@ -518,13 +514,13 @@ class StocktakeTest(StockAPITestCase):
 
         url = reverse('api-stock-transfer')
 
-        response = self.doPost(url, data)
+        response = self.post(url, data)
         self.assertContains(response, "Moved 1 parts to", status_code=status.HTTP_200_OK)
 
         # Now try one which will fail due to a bad location
         data['location'] = 'not a location'
 
-        response = self.doPost(url, data)
+        response = self.post(url, data)
         self.assertContains(response, 'Valid location must be specified', status_code=status.HTTP_400_BAD_REQUEST)
 
 

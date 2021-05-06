@@ -1,16 +1,19 @@
 {% extends "part/part_base.html" %}
 {% load static %}
 {% load i18n %}
+
+{% block menubar %}
+{% include 'part/navbar.html' with tab='stock' %}
+{% endblock %}
+
+{% block heading %}
+{% trans "Part Stock" %}
+{% endblock %}
+
 {% block details %}
-
-{% include 'part/tabs.html' with tab='stock' %}
-
-<h4>{% trans "Part Stock" %}</h4>
-<hr>
-
 {% if part.is_template %}
 <div class='alert alert-info alert-block'>
-    Showing stock for all variants of <i>{{ part.full_name }}</i>
+    {% blocktrans with full_name=part.full_name%}Showing stock for all variants of <i>{{full_name}}</i>{% endblocktrans %}
 </div>
 {% endif %}
 
@@ -37,7 +40,7 @@
         params: {
             part: {{ part.id }},
             location_detail: true,
-            part_detail: true,
+            part_detail: false,
         },
         groupByField: 'location',
         buttons: [

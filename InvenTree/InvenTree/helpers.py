@@ -12,8 +12,8 @@ from decimal import Decimal
 
 from wsgiref.util import FileWrapper
 from django.http import StreamingHttpResponse
-from django.core.exceptions import ValidationError
-from django.utils.translation import ugettext as _
+from django.core.exceptions import ValidationError, FieldError
+from django.utils.translation import ugettext_lazy as _
 
 from django.contrib.auth.models import Permission
 
@@ -267,7 +267,7 @@ def WrapWithQuotes(text, quote='"'):
     return text
 
 
-def MakeBarcode(object_name, object_pk, object_data, **kwargs):
+def MakeBarcode(object_name, object_pk, object_data={}, **kwargs):
     """ Generate a string for a barcode. Adds some global InvenTree parameters.
 
     Args:
@@ -280,11 +280,25 @@ def MakeBarcode(object_name, object_pk, object_data, **kwargs):
         json string of the supplied data plus some other data
     """
 
-    brief = kwargs.get('brief', False)
+    url = kwargs.get('url', False)
+    brief = kwargs.get('brief', True)
 
     data = {}
 
-    if brief:
+    if url:
+        request = object_data.get('request', None)
+        item_url = object_data.get('item_url', None)
+        absolute_url = None
+
+        if request and item_url:
+            absolute_url = request.build_absolute_uri(item_url)
+            # Return URL (No JSON)
+            return absolute_url
+
+        if item_url:
+            # Return URL (No JSON)
+            return item_url
+    elif brief:
         data[object_name] = object_pk
     else:
         data['tool'] = 'InvenTree'
@@ -343,6 +357,8 @@ def extract_serial_numbers(serials, expected_quantity):
     - Serial numbers must be positive
     - Serial numbers can be split by whitespace / newline / commma chars
     - Serial numbers can be supplied as an inclusive range using hyphen char e.g. 10-20
+    - Serial numbers can be supplied as <start>+ for getting all expecteded numbers starting from <start>
+    - Serial numbers can be supplied as <start>+<length> for getting <length> numbers starting from <start>
 
     Args:
         expected_quantity: The number of (unique) serial numbers we expect
@@ -354,6 +370,13 @@ def extract_serial_numbers(serials, expected_quantity):
 
     numbers = []
     errors = []
+
+    # helpers
+    def number_add(n):
+        if n in numbers:
+            errors.append(_('Duplicate serial: {n}').format(n=n))
+        else:
+            numbers.append(n)
 
     try:
         expected_quantity = int(expected_quantity)
@@ -381,18 +404,40 @@ def extract_serial_numbers(serials, expected_quantity):
 
                     if a < b:
                         for n in range(a, b + 1):
-                            if n in numbers:
-                                errors.append(_('Duplicate serial: {n}'.format(n=n)))
-                            else:
-                                numbers.append(n)
+                            number_add(n)
                     else:
-                        errors.append(_("Invalid group: {g}".format(g=group)))
+                        errors.append(_("Invalid group: {g}").format(g=group))
 
                 except ValueError:
-                    errors.append(_("Invalid group: {g}".format(g=group)))
+                    errors.append(_("Invalid group: {g}").format(g=group))
                     continue
             else:
-                errors.append(_("Invalid group: {g}".format(g=group)))
+                errors.append(_("Invalid group: {g}").format(g=group))
+                continue
+
+        # plus signals either
+        # 1:  'start+':  expected number of serials, starting at start
+        # 2:  'start+number': number of serials, starting at start
+        elif '+' in group:
+            items = group.split('+')
+
+            # case 1, 2
+            if len(items) == 2:
+                start = int(items[0])
+
+                # case 2
+                if bool(items[1]):
+                    end = start + int(items[1]) + 1
+
+                # case 1
+                else:
+                    end = start + expected_quantity
+
+                for n in range(start, end):
+                    number_add(n)
+            # no case
+            else:
+                errors.append(_("Invalid group: {g}").format(g=group))
                 continue
 
         else:
@@ -409,12 +454,12 @@ def extract_serial_numbers(serials, expected_quantity):
 
     # The number of extracted serial numbers must match the expected quantity
     if not expected_quantity == len(numbers):
-        raise ValidationError([_("Number of unique serial number ({s}) must match quantity ({q})".format(s=len(numbers), q=expected_quantity))])
+        raise ValidationError([_("Number of unique serial number ({s}) must match quantity ({q})").format(s=len(numbers), q=expected_quantity)])
 
     return numbers
 
 
-def validateFilterString(value):
+def validateFilterString(value, model=None):
     """
     Validate that a provided filter string looks like a list of comma-separated key=value pairs
 
@@ -464,6 +509,15 @@ def validateFilterString(value):
 
         results[k] = v
 
+    # If a model is provided, verify that the provided filters can be used against it
+    if model is not None:
+        try:
+            model.objects.filter(**results)
+        except FieldError as e:
+            raise ValidationError(
+                str(e),
+            )
+
     return results
 
 
@@ -483,3 +537,72 @@ def addUserPermissions(user, permissions):
 
     for permission in permissions:
         addUserPermission(user, permission)
+
+
+def getMigrationFileNames(app):
+    """
+    Return a list of all migration filenames for provided app
+    """
+
+    local_dir = os.path.dirname(os.path.abspath(__file__))
+
+    migration_dir = os.path.join(local_dir, '..', app, 'migrations')
+
+    files = os.listdir(migration_dir)
+
+    # Regex pattern for migration files
+    pattern = r"^[\d]+_.*\.py$"
+
+    migration_files = []
+
+    for f in files:
+        if re.match(pattern, f):
+            migration_files.append(f)
+
+    return migration_files
+
+
+def getOldestMigrationFile(app, exclude_extension=True, ignore_initial=True):
+    """
+    Return the filename associated with the oldest migration
+    """
+
+    oldest_num = -1
+    oldest_file = None
+
+    for f in getMigrationFileNames(app):
+
+        if ignore_initial and f.startswith('0001_initial'):
+            continue
+
+        num = int(f.split('_')[0])
+        
+        if oldest_file is None or num < oldest_num:
+            oldest_num = num
+            oldest_file = f
+
+    if exclude_extension:
+        oldest_file = oldest_file.replace('.py', '')
+
+    return oldest_file
+    
+
+def getNewestMigrationFile(app, exclude_extension=True):
+    """
+    Return the filename associated with the newest migration
+    """
+
+    newest_file = None
+    newest_num = -1
+
+    for f in getMigrationFileNames(app):
+        num = int(f.split('_')[0])
+
+        if newest_file is None or num > newest_num:
+            newest_num = num
+            newest_file = f
+
+    if exclude_extension:
+        newest_file = newest_file.replace('.py', '')
+
+    return newest_file

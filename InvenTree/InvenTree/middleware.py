@@ -8,7 +8,7 @@ import operator
 
 from rest_framework.authtoken.models import Token
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("inventree")
 
 
 class AuthRequiredMiddleware(object):
@@ -47,7 +47,16 @@ class AuthRequiredMiddleware(object):
 
             authorized = False
 
-            if 'Authorization' in request.headers.keys():
+            # Allow static files to be accessed without auth
+            # Important for e.g. login page
+            if request.path_info.startswith('/static/'):
+                authorized = True
+
+            # Unauthorized users can access the login page
+            elif request.path_info.startswith('/accounts/'):
+                authorized = True
+
+            elif 'Authorization' in request.headers.keys():
                 auth = request.headers['Authorization'].strip()
 
                 if auth.startswith('Token') and len(auth.split()) == 2:
@@ -56,7 +65,7 @@ class AuthRequiredMiddleware(object):
                     # Does the provided token match a valid user?
                     if Token.objects.filter(key=token).exists():
 
-                        allowed = ['/api/', '/media/', '/static/']
+                        allowed = ['/api/', '/media/']
 
                         # Only allow token-auth for /media/ or /static/ dirs!
                         if any([request.path_info.startswith(a) for a in allowed]):

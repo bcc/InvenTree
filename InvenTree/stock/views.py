@@ -11,8 +11,10 @@ from django.views.generic import DetailView, ListView, UpdateView
 from django.forms.models import model_to_dict
 from django.forms import HiddenInput
 from django.urls import reverse
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Group
 
-from django.utils.translation import ugettext as _
+from django.utils.translation import ugettext_lazy as _
 
 from moneyed import CURRENCIES
 
@@ -30,11 +32,11 @@ from datetime import datetime, timedelta
 
 from company.models import Company, SupplierPart
 from part.models import Part
-from report.models import TestReport
-from label.models import StockItemLabel
 from .models import StockItem, StockLocation, StockItemTracking, StockItemAttachment, StockItemTestResult
 
 import common.settings
+from common.models import InvenTreeSetting
+from users.models import Owner
 
 from .admin import StockItemResource
 
@@ -47,7 +49,6 @@ class StockIndex(InvenTreeRoleMixin, ListView):
     model = StockItem
     template_name = 'stock/location.html'
     context_obect_name = 'locations'
-    role_required = 'stock.view'
 
     def get_context_data(self, **kwargs):
         context = super(StockIndex, self).get_context_data(**kwargs).copy()
@@ -73,7 +74,6 @@ class StockLocationDetail(InvenTreeRoleMixin, DetailView):
     template_name = 'stock/location.html'
     queryset = StockLocation.objects.all()
     model = StockLocation
-    role_required = 'stock.view'
 
 
 class StockItemDetail(InvenTreeRoleMixin, DetailView):
@@ -85,7 +85,6 @@ class StockItemDetail(InvenTreeRoleMixin, DetailView):
     template_name = 'stock/item.html'
     queryset = StockItem.objects.all()
     model = StockItem
-    role_required = 'stock.view'
 
 
 class StockItemNotes(InvenTreeRoleMixin, UpdateView):
@@ -94,6 +93,7 @@ class StockItemNotes(InvenTreeRoleMixin, UpdateView):
     context_object_name = 'item'
     template_name = 'stock/item_notes.html'
     model = StockItem
+
     role_required = 'stock.view'
 
     fields = ['notes']
@@ -121,12 +121,12 @@ class StockLocationEdit(AjaxUpdateView):
     context_object_name = 'location'
     ajax_template_name = 'modal_form.html'
     ajax_form_title = _('Edit Stock Location')
-    role_required = 'stock.change'
-
+    
     def get_form(self):
         """ Customize form data for StockLocation editing.
 
         Limit the choices for 'parent' field to those which make sense.
+        If ownership control is enabled and location has parent, disable owner field.
         """
 
         form = super(AjaxUpdateView, self).get_form()
@@ -139,14 +139,112 @@ class StockLocationEdit(AjaxUpdateView):
 
         form.fields['parent'].queryset = parent_choices
 
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if not stock_ownership_control:
+            # Hide owner field
+            form.fields['owner'].widget = HiddenInput()
+        else:
+            # Get location's owner
+            location_owner = location.owner
+
+            if location_owner:
+                if location.parent:
+                    try:
+                        # If location has parent and owner: automatically select parent's owner
+                        parent_owner = location.parent.owner
+                        form.fields['owner'].initial = parent_owner
+                    except AttributeError:
+                        pass
+                else:
+                    # If current owner exists: automatically select it
+                    form.fields['owner'].initial = location_owner
+
+                # Update queryset or disable field (only if not admin)
+                if not self.request.user.is_superuser:
+                    if type(location_owner.owner) is Group:
+                        user_as_owner = Owner.get_owner(self.request.user)
+                        queryset = location_owner.get_related_owners(include_group=True)
+
+                        if user_as_owner not in queryset:
+                            # Only owners or admin can change current owner
+                            form.fields['owner'].disabled = True
+                        else:
+                            form.fields['owner'].queryset = queryset
+
         return form
+
+    def save(self, object, form, **kwargs):
+        """ If location has children and ownership control is enabled:
+            - update owner of all children location of this location
+            - update owner for all stock items at this location
+        """
+
+        self.object = form.save()
+        
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if stock_ownership_control and self.object.owner:
+            # Get authorized users
+            authorized_owners = self.object.owner.get_related_owners()
+
+            # Update children locations
+            children_locations = self.object.get_children()
+            for child in children_locations:
+                # Check if current owner is subset of new owner
+                if child.owner and authorized_owners:
+                    if child.owner in authorized_owners:
+                        continue
+
+                child.owner = self.object.owner
+                child.save()
+
+            # Update stock items
+            stock_items = self.object.get_stock_items()
+
+            for stock_item in stock_items:
+                # Check if current owner is subset of new owner
+                if stock_item.owner and authorized_owners:
+                    if stock_item.owner in authorized_owners:
+                        continue
+
+                stock_item.owner = self.object.owner
+                stock_item.save()
+
+        return self.object
+
+    def validate(self, item, form):
+        """ Check that owner is set if stock ownership control is enabled """
+
+        parent = form.cleaned_data.get('parent', None)
+
+        owner = form.cleaned_data.get('owner', None)
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if stock_ownership_control:
+            if not owner and not self.request.user.is_superuser:
+                form.add_error('owner', _('Owner is required (ownership control is enabled)'))
+            else:
+                try:
+                    if parent.owner:
+                        if parent.owner != owner:
+                            error = f'Owner requires to be equivalent to parent\'s owner ({parent.owner})'
+                            form.add_error('owner', error)
+                except AttributeError:
+                    # No parent
+                    pass
 
 
 class StockLocationQRCode(QRCodeView):
     """ View for displaying a QR code for a StockLocation object """
 
     ajax_form_title = _("Stock Location QR code")
-    role_required = 'stock.view'
+
+    role_required = ['stock_location.view', 'stock.view']
 
     def get_qr_data(self):
         """ Generate QR code data for the StockLocation """
@@ -166,7 +264,6 @@ class StockItemAttachmentCreate(AjaxCreateView):
     form_class = StockForms.EditStockItemAttachmentForm
     ajax_form_title = _("Add Stock Item Attachment")
     ajax_template_name = "modal_form.html"
-    role_required = 'stock.add'
 
     def save(self, form, **kwargs):
         """ Record the user that uploaded the attachment """
@@ -212,8 +309,7 @@ class StockItemAttachmentEdit(AjaxUpdateView):
     model = StockItemAttachment
     form_class = StockForms.EditStockItemAttachmentForm
     ajax_form_title = _("Edit Stock Item Attachment")
-    role_required = 'stock.change'
-
+    
     def get_form(self):
 
         form = super().get_form()
@@ -231,8 +327,7 @@ class StockItemAttachmentDelete(AjaxDeleteView):
     ajax_form_title = _("Delete Stock Item Attachment")
     ajax_template_name = "attachment_delete.html"
     context_object_name = "attachment"
-    role_required = 'stock.delete'
-
+    
     def get_data(self):
         return {
             'danger': _("Deleted attachment"),
@@ -248,7 +343,6 @@ class StockItemAssignToCustomer(AjaxUpdateView):
     ajax_form_title = _("Assign to Customer")
     context_object_name = "item"
     form_class = StockForms.AssignStockItemToCustomerForm
-    role_required = 'stock.change'
 
     def validate(self, item, form, **kwargs):
 
@@ -282,8 +376,7 @@ class StockItemReturnToStock(AjaxUpdateView):
     ajax_form_title = _("Return to Stock")
     context_object_name = "item"
     form_class = StockForms.ReturnStockItemForm
-    role_required = 'stock.change'
-
+    
     def validate(self, item, form, **kwargs):
 
         location = form.cleaned_data.get('location', None)
@@ -304,92 +397,6 @@ class StockItemReturnToStock(AjaxUpdateView):
         }
 
 
-class StockItemSelectLabels(AjaxView):
-    """
-    View for selecting a template for printing labels for one (or more) StockItem objects
-    """
-
-    model = StockItem
-    ajax_form_title = _('Select Label Template')
-    role_required = 'stock.view'
-
-    def get_form(self):
-
-        item = StockItem.objects.get(pk=self.kwargs['pk'])
-
-        labels = []
-
-        # Construct a list of StockItemLabel objects which are enabled, and the filters match the selected StockItem
-        for label in StockItemLabel.objects.filter(enabled=True):
-            if label.matches_stock_item(item):
-                labels.append(label)
-
-        return StockForms.StockItemLabelSelectForm(labels)
-
-    def post(self, request, *args, **kwargs):
-
-        label = request.POST.get('label', None)
-
-        try:
-            label = StockItemLabel.objects.get(pk=label)
-        except (ValueError, StockItemLabel.DoesNotExist):
-            raise ValidationError({'label': _("Select valid label")})
-    
-        stock_item = StockItem.objects.get(pk=self.kwargs['pk'])
-
-        url = reverse('stock-item-print-labels')
-
-        url += '?label={pk}'.format(pk=label.pk)
-        url += '&items[]={pk}'.format(pk=stock_item.pk)
-
-        data = {
-            'form_valid': True,
-            'url': url,
-        }
-
-        return self.renderJsonResponse(request, self.get_form(), data=data)
-
-
-class StockItemPrintLabels(AjaxView):
-    """
-    View for printing labels and returning a PDF
-
-    Requires the following arguments to be passed as URL params:
-
-    items: List of valid StockItem pk values
-    label: Valid pk of a StockItemLabel template
-    """
-
-    role_required = 'stock.view'
-
-    def get(self, request, *args, **kwargs):
-
-        label = request.GET.get('label', None)
-
-        try:
-            label = StockItemLabel.objects.get(pk=label)
-        except (ValueError, StockItemLabel.DoesNotExist):
-            raise ValidationError({'label': 'Invalid label ID'})
-
-        item_pks = request.GET.getlist('items[]')
-
-        items = []
-
-        for pk in item_pks:
-            try:
-                item = StockItem.objects.get(pk=pk)
-                items.append(item)
-            except (ValueError, StockItem.DoesNotExist):
-                pass
-
-        if len(items) == 0:
-            raise ValidationError({'items': 'Must provide valid stockitems'})
-
-        pdf = label.render(items).getbuffer()
-
-        return DownloadFile(pdf, 'stock_labels.pdf', content_type='application/pdf')
-
-
 class StockItemDeleteTestData(AjaxUpdateView):
     """
     View for deleting all test data
@@ -398,6 +405,7 @@ class StockItemDeleteTestData(AjaxUpdateView):
     model = StockItem
     form_class = ConfirmForm
     ajax_form_title = _("Delete All Test Data")
+        
     role_required = ['stock.change', 'stock.delete']
 
     def get_form(self):
@@ -434,7 +442,6 @@ class StockItemTestResultCreate(AjaxCreateView):
     model = StockItemTestResult
     form_class = StockForms.EditStockItemTestResultForm
     ajax_form_title = _("Add Test Result")
-    role_required = 'stock.add'
 
     def save(self, form, **kwargs):
         """
@@ -475,7 +482,6 @@ class StockItemTestResultEdit(AjaxUpdateView):
     model = StockItemTestResult
     form_class = StockForms.EditStockItemTestResultForm
     ajax_form_title = _("Edit Test Result")
-    role_required = 'stock.change'
 
     def get_form(self):
 
@@ -494,93 +500,6 @@ class StockItemTestResultDelete(AjaxDeleteView):
     model = StockItemTestResult
     ajax_form_title = _("Delete Test Result")
     context_object_name = "result"
-    role_required = 'stock.delete'
-
-
-class StockItemTestReportSelect(AjaxView):
-    """
-    View for selecting a TestReport template,
-    and generating a TestReport as a PDF.
-    """
-
-    model = StockItem
-    ajax_form_title = _("Select Test Report Template")
-    role_required = 'stock.view'
-
-    def get_form(self):
-
-        stock_item = StockItem.objects.get(pk=self.kwargs['pk'])
-        form = StockForms.TestReportFormatForm(stock_item)
-
-        return form
-
-    def get_initial(self):
-
-        initials = super().get_initial()
-
-        form = self.get_form()
-        options = form.fields['template'].queryset
-
-        # If only a single template is available, pre-select it
-        if options.count() == 1:
-            initials['template'] = options[0]
-
-        return initials
-
-    def post(self, request, *args, **kwargs):
-
-        template_id = request.POST.get('template', None)
-
-        try:
-            template = TestReport.objects.get(pk=template_id)
-        except (ValueError, TestReport.DoesNoteExist):
-            raise ValidationError({'template': _("Select valid template")})
-
-        stock_item = StockItem.objects.get(pk=self.kwargs['pk'])
-
-        url = reverse('stock-item-test-report-download')
-
-        url += '?stock_item={id}'.format(id=stock_item.pk)
-        url += '&template={id}'.format(id=template.pk)
-
-        data = {
-            'form_valid': True,
-            'url': url,
-        }
-
-        return self.renderJsonResponse(request, self.get_form(), data=data)
-
-
-class StockItemTestReportDownload(AjaxView):
-    """
-    Download a TestReport against a StockItem.
-
-    Requires the following arguments to be passed as URL params:
-
-    stock_item - Valid PK of a StockItem object
-    template - Valid PK of a TestReport template object
-
-    """
-    role_required = 'stock.view'
-
-    def get(self, request, *args, **kwargs):
-
-        template = request.GET.get('template', None)
-        stock_item = request.GET.get('stock_item', None)
-
-        try:
-            template = TestReport.objects.get(pk=template)
-        except (ValueError, TestReport.DoesNotExist):
-            raise ValidationError({'template': 'Invalid template ID'})
-
-        try:
-            stock_item = StockItem.objects.get(pk=stock_item)
-        except (ValueError, StockItem.DoesNotExist):
-            raise ValidationError({'stock_item': 'Invalid StockItem ID'})
-
-        template.stock_item = stock_item
-
-        return template.render(request)
 
 
 class StockExportOptions(AjaxView):
@@ -589,7 +508,6 @@ class StockExportOptions(AjaxView):
     model = StockLocation
     ajax_form_title = _('Stock Export Options')
     form_class = StockForms.ExportOptionsForm
-    role_required = 'stock.view'
 
     def post(self, request, *args, **kwargs):
 
@@ -737,7 +655,6 @@ class StockItemInstall(AjaxUpdateView):
     form_class = StockForms.InstallStockForm
     ajax_form_title = _('Install Stock Item')
     ajax_template_name = "stock/item_install.html"
-    role_required = 'stock.change'
 
     part = None
 
@@ -1048,7 +965,7 @@ class StockAdjust(AjaxView, FormMixin):
 
         context['stock_action'] = self.stock_action.strip().lower()
 
-        context['stock_action_title'] = self.stock_action.capitalize()
+        context['stock_action_title'] = self.stock_action_title
 
         # Quantity column will be read-only in some circumstances
         context['edit_quantity'] = not self.stock_action == 'delete'
@@ -1076,17 +993,18 @@ class StockAdjust(AjaxView, FormMixin):
         if self.stock_action not in ['move', 'count', 'take', 'add', 'delete']:
             self.stock_action = 'count'
 
-        # Choose the form title based on the action
+        # Choose form title and action column based on the action
         titles = {
-            'move': _('Move Stock Items'),
-            'count': _('Count Stock Items'),
-            'take': _('Remove From Stock'),
-            'add': _('Add Stock Items'),
-            'delete': _('Delete Stock Items')
+            'move': [_('Move Stock Items'), _('Move')],
+            'count': [_('Count Stock Items'), _('Count')],
+            'take': [_('Remove From Stock'), _('Take')],
+            'add': [_('Add Stock Items'), _('Add')],
+            'delete': [_('Delete Stock Items'), _('Delete')],
         }
 
-        self.ajax_form_title = titles[self.stock_action]
-        
+        self.ajax_form_title = titles[self.stock_action][0]
+        self.stock_action_title = titles[self.stock_action][1]
+
         # Save list of items!
         self.stock_items = self.get_GET_items()
 
@@ -1122,7 +1040,7 @@ class StockAdjust(AjaxView, FormMixin):
             if self.stock_action in ['move', 'take']:
 
                 if item.new_quantity > item.quantity:
-                    item.error = _('Quantity must not exceed {x}'.format(x=item.quantity))
+                    item.error = _('Quantity must not exceed {x}').format(x=item.quantity)
                     valid = False
                     continue
 
@@ -1186,7 +1104,7 @@ class StockAdjust(AjaxView, FormMixin):
             return self.do_delete()
 
         else:
-            return 'No action performed'
+            return _('No action performed')
 
     def do_add(self):
         
@@ -1201,7 +1119,7 @@ class StockAdjust(AjaxView, FormMixin):
 
             count += 1
 
-        return _("Added stock to {n} items".format(n=count))
+        return _('Added stock to {n} items').format(n=count)
 
     def do_take(self):
 
@@ -1216,7 +1134,7 @@ class StockAdjust(AjaxView, FormMixin):
 
             count += 1
 
-        return _("Removed stock from {n} items".format(n=count))
+        return _('Removed stock from {n} items').format(n=count)
 
     def do_count(self):
         
@@ -1256,13 +1174,25 @@ class StockAdjust(AjaxView, FormMixin):
 
             count += 1
 
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if stock_ownership_control:
+            # Fetch destination owner
+            destination_owner = destination.owner
+
+            if destination_owner:
+                # Update owner
+                item.owner = destination_owner
+                item.save()
+
         if count == 0:
             return _('No items were moved')
         
         else:
-            return _('Moved {n} items to {dest}'.format(
+            return _('Moved {n} items to {dest}').format(
                 n=count,
-                dest=destination.pathstring))
+                dest=destination.pathstring)
 
     def do_delete(self):
         """ Delete multiple stock items """
@@ -1279,7 +1209,7 @@ class StockAdjust(AjaxView, FormMixin):
 
             count += 1
 
-        return _("Deleted {n} stock items".format(n=count))
+        return _("Deleted {n} stock items").format(n=count)
 
 
 class StockItemEdit(AjaxUpdateView):
@@ -1292,7 +1222,6 @@ class StockItemEdit(AjaxUpdateView):
     context_object_name = 'item'
     ajax_template_name = 'modal_form.html'
     ajax_form_title = _('Edit Stock Item')
-    role_required = 'stock.change'
 
     def get_form(self):
         """ Get form for StockItem editing.
@@ -1304,7 +1233,7 @@ class StockItemEdit(AjaxUpdateView):
 
         # Hide the "expiry date" field if the feature is not enabled
         if not common.settings.stock_expiry_enabled():
-            form.fields.pop('expiry_date')
+            form.fields['expiry_date'].widget = HiddenInput()
 
         item = self.get_object()
 
@@ -1322,7 +1251,75 @@ class StockItemEdit(AjaxUpdateView):
         if not item.part.trackable and not item.serialized:
             form.fields['serial'].widget = HiddenInput()
 
+        location = item.location
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if not stock_ownership_control:
+            form.fields['owner'].widget = HiddenInput()
+        else:
+            try:
+                location_owner = location.owner
+            except AttributeError:
+                location_owner = None
+
+            # Check if location has owner
+            if location_owner:
+                form.fields['owner'].initial = location_owner
+
+                # Check location's owner type and filter potential owners
+                if type(location_owner.owner) is Group:
+                    user_as_owner = Owner.get_owner(self.request.user)
+                    queryset = location_owner.get_related_owners(include_group=True)
+
+                    if user_as_owner in queryset:
+                        form.fields['owner'].initial = user_as_owner
+
+                    form.fields['owner'].queryset = queryset
+
+                elif type(location_owner.owner) is get_user_model():
+                    # If location's owner is a user: automatically set owner field and disable it
+                    form.fields['owner'].disabled = True
+                    form.fields['owner'].initial = location_owner
+
+            try:
+                item_owner = item.owner
+            except AttributeError:
+                item_owner = None
+
+            # Check if item has owner
+            if item_owner:
+                form.fields['owner'].initial = item_owner
+
+                # Check item's owner type and filter potential owners
+                if type(item_owner.owner) is Group:
+                    user_as_owner = Owner.get_owner(self.request.user)
+                    queryset = item_owner.get_related_owners(include_group=True)
+
+                    if user_as_owner in queryset:
+                        form.fields['owner'].initial = user_as_owner
+
+                    form.fields['owner'].queryset = queryset
+
+                elif type(item_owner.owner) is get_user_model():
+                    # If item's owner is a user: automatically set owner field and disable it
+                    form.fields['owner'].disabled = True
+                    form.fields['owner'].initial = item_owner
+
         return form
+
+    def validate(self, item, form):
+        """ Check that owner is set if stock ownership control is enabled """
+
+        owner = form.cleaned_data.get('owner', None)
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if stock_ownership_control:
+            if not owner and not self.request.user.is_superuser:
+                form.add_error('owner', _('Owner is required (ownership control is enabled)'))
 
 
 class StockItemConvert(AjaxUpdateView):
@@ -1335,7 +1332,6 @@ class StockItemConvert(AjaxUpdateView):
     ajax_form_title = _('Convert Stock Item')
     ajax_template_name = 'stock/stockitem_convert.html'
     context_object_name = 'item'
-    role_required = 'stock.change'
 
     def get_form(self):
         """
@@ -1361,7 +1357,6 @@ class StockLocationCreate(AjaxCreateView):
     context_object_name = 'location'
     ajax_template_name = 'modal_form.html'
     ajax_form_title = _('Create new Stock Location')
-    role_required = 'stock.add'
 
     def get_initial(self):
         initials = super(StockLocationCreate, self).get_initial().copy()
@@ -1376,6 +1371,76 @@ class StockLocationCreate(AjaxCreateView):
 
         return initials
 
+    def get_form(self):
+        """ Disable owner field when:
+            - creating child location
+            - and stock ownership control is enable
+        """
+
+        form = super().get_form()
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if not stock_ownership_control:
+            # Hide owner field
+            form.fields['owner'].widget = HiddenInput()
+        else:
+            # If user did not selected owner: automatically match to parent's owner
+            if not form['owner'].data:
+                try:
+                    parent_id = form['parent'].value()
+                    parent = StockLocation.objects.get(pk=parent_id)
+
+                    if parent:
+                        form.fields['owner'].initial = parent.owner
+                        if not self.request.user.is_superuser:
+                            form.fields['owner'].disabled = True
+                except StockLocation.DoesNotExist:
+                    pass
+                except ValueError:
+                    pass
+
+        return form
+
+    def save(self, form):
+        """ If parent location exists then use it to set the owner """
+
+        self.object = form.save(commit=False)
+
+        parent = form.cleaned_data.get('parent', None)
+
+        if parent:
+            # Select parent's owner
+            self.object.owner = parent.owner
+
+        self.object.save()
+
+        return self.object
+
+    def validate(self, item, form):
+        """ Check that owner is set if stock ownership control is enabled """
+
+        parent = form.cleaned_data.get('parent', None)
+
+        owner = form.cleaned_data.get('owner', None)
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if stock_ownership_control:
+            if not owner and not self.request.user.is_superuser:
+                form.add_error('owner', _('Owner is required (ownership control is enabled)'))
+            else:
+                try:
+                    if parent.owner:
+                        if parent.owner != owner:
+                            error = f'Owner requires to be equivalent to parent\'s owner ({parent.owner})'
+                            form.add_error('owner', error)
+                except AttributeError:
+                    # No parent
+                    pass
+
 
 class StockItemSerialize(AjaxUpdateView):
     """ View for manually serializing a StockItem """
@@ -1384,7 +1449,6 @@ class StockItemSerialize(AjaxUpdateView):
     ajax_template_name = 'stock/item_serialize.html'
     ajax_form_title = _('Serialize Stock')
     form_class = StockForms.SerializeStockForm
-    role_required = 'stock.change'
 
     def get_form(self):
 
@@ -1477,7 +1541,6 @@ class StockItemCreate(AjaxCreateView):
     context_object_name = 'item'
     ajax_template_name = 'modal_form.html'
     ajax_form_title = _('Create new Stock Item')
-    role_required = 'stock.add'
 
     def get_part(self, form=None):
         """
@@ -1519,7 +1582,7 @@ class StockItemCreate(AjaxCreateView):
 
         # Hide the "expiry date" field if the feature is not enabled
         if not common.settings.stock_expiry_enabled():
-            form.fields.pop('expiry_date')
+            form.fields['expiry_date'].widget = HiddenInput()
 
         part = self.get_part(form=form)
 
@@ -1570,7 +1633,42 @@ class StockItemCreate(AjaxCreateView):
         # Otherwise if the user has selected a SupplierPart, we know what Part they meant!
         if form['supplier_part'].value() is not None:
             pass
-            
+
+        location = None
+        try:
+            loc_id = form['location'].value()
+            location = StockLocation.objects.get(pk=loc_id)
+        except StockLocation.DoesNotExist:
+            pass
+        except ValueError:
+            pass
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+        if not stock_ownership_control:
+            form.fields['owner'].widget = HiddenInput()
+        else:
+            try:
+                location_owner = location.owner
+            except AttributeError:
+                location_owner = None
+
+            if location_owner:
+                # Check location's owner type and filter potential owners
+                if type(location_owner.owner) is Group:
+                    user_as_owner = Owner.get_owner(self.request.user)
+                    queryset = location_owner.get_related_owners()
+                    
+                    if user_as_owner in queryset:
+                        form.fields['owner'].initial = user_as_owner
+
+                    form.fields['owner'].queryset = queryset
+
+                elif type(location_owner.owner) is get_user_model():
+                    # If location's owner is a user: automatically set owner field and disable it
+                    form.fields['owner'].disabled = True
+                    form.fields['owner'].initial = location_owner
+                
         return form
 
     def get_initial(self):
@@ -1647,9 +1745,14 @@ class StockItemCreate(AjaxCreateView):
 
         data = form.cleaned_data
 
-        part = data['part']
+        part = data.get('part', None)
         
         quantity = data.get('quantity', None)
+
+        owner = data.get('owner', None)
+
+        if not part:
+            return
 
         if not quantity:
             return
@@ -1669,17 +1772,31 @@ class StockItemCreate(AjaxCreateView):
             sn = str(sn).strip()
 
             if len(sn) > 0:
-                serials = extract_serial_numbers(sn, quantity)
+                try:
+                    serials = extract_serial_numbers(sn, quantity)
+                except ValidationError as e:
+                    serials = None
+                    form.add_error('serial_numbers', e.messages)
 
-                existing = part.find_conflicting_serial_numbers(serials)
+                if serials is not None:
+                    existing = part.find_conflicting_serial_numbers(serials)
 
-                if len(existing) > 0:
-                    exists = ','.join([str(x) for x in existing])
+                    if len(existing) > 0:
+                        exists = ','.join([str(x) for x in existing])
 
-                    form.add_error(
-                        'serial_numbers',
-                        _('Serial numbers already exist') + ': ' + exists
-                    )
+                        form.add_error(
+                            'serial_numbers',
+                            _('Serial numbers already exist') + ': ' + exists
+                        )
+
+        # Is ownership control enabled?
+        stock_ownership_control = InvenTreeSetting.get_setting('STOCK_OWNERSHIP_CONTROL')
+
+        if stock_ownership_control:
+            # Check if owner is set
+            if not owner and not self.request.user.is_superuser:
+                form.add_error('owner', _('Owner is required (ownership control is enabled)'))
+                return
 
     def save(self, form, **kwargs):
         """
@@ -1721,7 +1838,7 @@ class StockItemCreate(AjaxCreateView):
 
                 item = form.save(commit=False)
                 item.user = self.request.user
-                item.save()
+                item.save(user=self.request.user)
 
                 return item
             
@@ -1732,7 +1849,7 @@ class StockItemCreate(AjaxCreateView):
             
             item = form.save(commit=False)
             item.user = self.request.user
-            item.save()
+            item.save(user=self.request.user)
 
             return item
 
@@ -1748,7 +1865,6 @@ class StockLocationDelete(AjaxDeleteView):
     ajax_template_name = 'stock/location_delete.html'
     context_object_name = 'location'
     ajax_form_title = _('Delete Stock Location')
-    role_required = 'stock.delete'
 
 
 class StockItemDelete(AjaxDeleteView):
@@ -1762,7 +1878,6 @@ class StockItemDelete(AjaxDeleteView):
     ajax_template_name = 'stock/item_delete.html'
     context_object_name = 'item'
     ajax_form_title = _('Delete Stock Item')
-    role_required = 'stock.delete'
 
 
 class StockItemTrackingDelete(AjaxDeleteView):
@@ -1774,18 +1889,6 @@ class StockItemTrackingDelete(AjaxDeleteView):
     model = StockItemTracking
     ajax_template_name = 'stock/tracking_delete.html'
     ajax_form_title = _('Delete Stock Tracking Entry')
-    role_required = 'stock.delete'
-
-
-class StockTrackingIndex(InvenTreeRoleMixin, ListView):
-    """
-    StockTrackingIndex provides a page to display StockItemTracking objects
-    """
-
-    model = StockItemTracking
-    template_name = 'stock/tracking.html'
-    context_object_name = 'items'
-    role_required = 'stock.view'
 
 
 class StockItemTrackingEdit(AjaxUpdateView):
@@ -1794,7 +1897,6 @@ class StockItemTrackingEdit(AjaxUpdateView):
     model = StockItemTracking
     ajax_form_title = _('Edit Stock Tracking Entry')
     form_class = StockForms.TrackingEntryForm
-    role_required = 'stock.change'
 
 
 class StockItemTrackingCreate(AjaxCreateView):
@@ -1804,7 +1906,6 @@ class StockItemTrackingCreate(AjaxCreateView):
     model = StockItemTracking
     ajax_form_title = _("Add Stock Tracking Entry")
     form_class = StockForms.TrackingEntryForm
-    role_required = 'stock.add'
 
     def post(self, request, *args, **kwargs):
 

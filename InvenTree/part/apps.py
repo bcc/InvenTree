@@ -7,8 +7,12 @@ from django.db.utils import OperationalError, ProgrammingError
 from django.apps import AppConfig
 from django.conf import settings
 
+from PIL import UnidentifiedImageError
 
-logger = logging.getLogger(__name__)
+from InvenTree.ready import canAppAccessDatabase
+
+
+logger = logging.getLogger("inventree")
 
 
 class PartConfig(AppConfig):
@@ -19,8 +23,9 @@ class PartConfig(AppConfig):
         This function is called whenever the Part app is loaded.
         """
 
-        self.generate_part_thumbnails()
-        self.update_trackable_status()
+        if canAppAccessDatabase():
+            self.generate_part_thumbnails()
+            self.update_trackable_status()
 
     def generate_part_thumbnails(self):
         """
@@ -44,9 +49,11 @@ class PartConfig(AppConfig):
                         try:
                             part.image.render_variations(replace=False)
                         except FileNotFoundError:
-                            logger.warning("Image file missing")
+                            logger.warning(f"Image file '{part.image}' missing")
                             part.image = None
                             part.save()
+                        except UnidentifiedImageError:
+                            logger.warning(f"Image file '{part.image}' is invalid")
         except (OperationalError, ProgrammingError):
             # Exception if the database has not been migrated yet
             pass

@@ -5,16 +5,25 @@ from django.db.utils import OperationalError, ProgrammingError
 
 from django.apps import AppConfig
 
+from InvenTree.ready import canAppAccessDatabase
+
 
 class UsersConfig(AppConfig):
     name = 'users'
 
     def ready(self):
 
-        try:
-            self.assign_permissions()
-        except (OperationalError, ProgrammingError):
-            pass
+        if canAppAccessDatabase():
+
+            try:
+                self.assign_permissions()
+            except (OperationalError, ProgrammingError):
+                pass
+
+            try:
+                self.update_owners()
+            except (OperationalError, ProgrammingError):
+                pass
 
     def assign_permissions(self):
 
@@ -31,3 +40,17 @@ class UsersConfig(AppConfig):
         for group in Group.objects.all():
 
             update_group_roles(group)
+
+    def update_owners(self):
+
+        from django.contrib.auth import get_user_model
+        from django.contrib.auth.models import Group
+        from users.models import Owner
+
+        # Create group owners
+        for group in Group.objects.all():
+            Owner.create(group)
+
+        # Create user owners
+        for user in get_user_model().objects.all():
+            Owner.create(user)

@@ -7,17 +7,18 @@ from __future__ import unicode_literals
 
 from django_filters.rest_framework import DjangoFilterBackend
 from django.http import JsonResponse
-from django.db.models import Q, F, Count, Prefetch, Sum
+from django.db.models import Q, F, Count
+from django.utils.translation import ugettext_lazy as _
 
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework import filters, serializers
-from rest_framework import generics, permissions
+from rest_framework import generics
 
 from django.conf.urls import url, include
 from django.urls import reverse
 
-from .models import Part, PartCategory, BomItem, PartStar
+from .models import Part, PartCategory, BomItem
 from .models import PartParameter, PartParameterTemplate
 from .models import PartAttachment, PartTestTemplate
 from .models import PartSellPriceBreak
@@ -30,13 +31,16 @@ from . import serializers as part_serializers
 from InvenTree.views import TreeSerializer
 from InvenTree.helpers import str2bool, isNull
 from InvenTree.api import AttachmentMixin
+
 from InvenTree.status_codes import BuildStatus
 
 
 class PartCategoryTree(TreeSerializer):
 
-    title = "Parts"
+    title = _("Parts")
     model = PartCategory
+
+    queryset = PartCategory.objects.all()
     
     @property
     def root_url(self):
@@ -44,10 +48,6 @@ class PartCategoryTree(TreeSerializer):
 
     def get_items(self):
         return PartCategory.objects.all().prefetch_related('parts', 'children')
-
-    permission_classes = [
-        permissions.IsAuthenticated,
-    ]
 
 
 class CategoryList(generics.ListCreateAPIView):
@@ -60,28 +60,43 @@ class CategoryList(generics.ListCreateAPIView):
     queryset = PartCategory.objects.all()
     serializer_class = part_serializers.CategorySerializer
 
-    def get_queryset(self):
+    def filter_queryset(self, queryset):
         """
         Custom filtering:
         - Allow filtering by "null" parent to retrieve top-level part categories
         """
 
-        cat_id = self.request.query_params.get('parent', None)
+        queryset = super().filter_queryset(queryset)
 
-        queryset = super().get_queryset()
+        params = self.request.query_params
 
-        if cat_id is not None:
+        cat_id = params.get('parent', None)
+
+        cascade = str2bool(params.get('cascade', False))
+
+        # Do not filter by category
+        if cat_id is None:
+            pass
+        # Look for top-level categories
+        elif isNull(cat_id):
             
-            # Look for top-level categories
-            if isNull(cat_id):
+            if not cascade:
                 queryset = queryset.filter(parent=None)
-            
-            else:
-                try:
-                    cat_id = int(cat_id)
-                    queryset = queryset.filter(parent=cat_id)
-                except ValueError:
-                    pass
+
+        else:
+            try:
+                category = PartCategory.objects.get(pk=cat_id)
+
+                if cascade:
+                    parents = category.get_descendants(include_self=True)
+                    parent_ids = [p.id for p in parents]
+
+                    queryset = queryset.filter(parent__in=parent_ids)
+                else:
+                    queryset = queryset.filter(parent=category)
+
+            except (ValueError, PartCategory.DoesNotExist):
+                pass
 
         return queryset
 
@@ -328,6 +343,22 @@ class PartDetail(generics.RetrieveUpdateDestroyAPIView):
             message = f'Part \'{part.name}\' (pk = {part.pk}) is active: cannot delete'
             return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED, data=message)
 
+    def update(self, request, *args, **kwargs):
+        """
+        Custom update functionality for Part instance.
+
+        - If the 'starred' field is provided, update the 'starred' status against current user
+        """
+
+        if 'starred' in request.data:
+            starred = str2bool(request.data.get('starred', None))
+
+            self.get_object().setStarred(request.user, starred)
+
+        response = super().update(request, *args, **kwargs)
+
+        return response
+
 
 class PartList(generics.ListCreateAPIView):
     """ API endpoint for accessing a list of Part objects
@@ -382,11 +413,11 @@ class PartList(generics.ListCreateAPIView):
         queryset = self.filter_queryset(self.get_queryset())
 
         page = self.paginate_queryset(queryset)
+
         if page is not None:
             serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = self.get_serializer(queryset, many=True)
+        else:
+            serializer = self.get_serializer(queryset, many=True)
 
         data = serializer.data
 
@@ -430,7 +461,9 @@ class PartList(generics.ListCreateAPIView):
         a) For HTTP requests (e.g. via the browseable API) return a DRF response
         b) For AJAX requests, simply return a JSON rendered response.
         """
-        if request.is_ajax():
+        if page is not None:
+            return self.get_paginated_response(data)
+        elif request.is_ajax():
             return JsonResponse(data, safe=False)
         else:
             return Response(data)
@@ -464,6 +497,18 @@ class PartList(generics.ListCreateAPIView):
         params = self.request.query_params
 
         queryset = super().filter_queryset(queryset)
+
+        # Filter by "uses" query - Limit to parts which use the provided part
+        uses = params.get('uses', None)
+
+        if uses:
+            try:
+                uses = Part.objects.get(pk=uses)
+
+                queryset = queryset.filter(uses.get_used_in_filter())
+
+            except (ValueError, Part.DoesNotExist):
+                pass
 
         # Filter by 'ancestor'?
         ancestor = params.get('ancestor', None)
@@ -590,39 +635,28 @@ class PartList(generics.ListCreateAPIView):
         # TODO: Need to figure out a cheaper way of making this filter query
 
         if stock_to_build is not None:
-            # Filter only active parts
-            queryset = queryset.filter(active=True)
-            # Prefetch current active builds
-            build_active_queryset = Build.objects.filter(status__in=BuildStatus.ACTIVE_CODES)
-            build_active_prefetch = Prefetch('builds',
-                                             queryset=build_active_queryset,
-                                             to_attr='current_builds')
-            parts = queryset.prefetch_related(build_active_prefetch)
-
+            # Get active builds
+            builds = Build.objects.filter(status__in=BuildStatus.ACTIVE_CODES)
             # Store parts with builds needing stock
-            parts_need_stock = []
+            parts_needed_to_complete_builds = []
+            # Filter required parts
+            for build in builds:
+                parts_needed_to_complete_builds += [part.pk for part in build.required_parts_to_complete_build]
 
-            # Find parts with active builds
-            # where any subpart's stock is lower than quantity being built
-            for part in parts:
-                if part.current_builds:
-                    builds_ids = [build.id for build in part.current_builds]
-                    total_build_quantity = build_active_queryset.filter(pk__in=builds_ids).aggregate(quantity=Sum('quantity'))['quantity']
+            queryset = queryset.filter(pk__in=parts_needed_to_complete_builds)
 
-                    if part.can_build < total_build_quantity:
-                        parts_need_stock.append(part.pk)
+        # Optionally limit the maximum number of returned results
+        # e.g. for displaying "recent part" list
+        max_results = params.get('max_results', None)
 
-            queryset = queryset.filter(pk__in=parts_need_stock)
-
-        # Limit choices
-        limit = params.get('limit', None)
-
-        if limit is not None:
+        if max_results is not None:
             try:
-                limit = int(limit)
-                if limit > 0:
-                    queryset = queryset[:limit]
-            except ValueError:
+                max_results = int(max_results)
+
+                if max_results > 0:
+                    queryset = queryset[:max_results]
+
+            except (ValueError):
                 pass
 
         return queryset
@@ -647,65 +681,20 @@ class PartList(generics.ListCreateAPIView):
     ordering_fields = [
         'name',
         'creation_date',
+        'IPN',
+        'in_stock',
     ]
 
     # Default ordering
     ordering = 'name'
 
     search_fields = [
-        '$name',
+        'name',
         'description',
-        '$IPN',
+        'IPN',
+        'revision',
         'keywords',
-    ]
-
-
-class PartStarDetail(generics.RetrieveDestroyAPIView):
-    """ API endpoint for viewing or removing a PartStar object """
-
-    queryset = PartStar.objects.all()
-    serializer_class = part_serializers.PartStarSerializer
-
-
-class PartStarList(generics.ListCreateAPIView):
-    """ API endpoint for accessing a list of PartStar objects.
-
-    - GET: Return list of PartStar objects
-    - POST: Create a new PartStar object
-    """
-
-    queryset = PartStar.objects.all()
-    serializer_class = part_serializers.PartStarSerializer
-
-    def create(self, request, *args, **kwargs):
-
-        # Override the user field (with the logged-in user)
-        data = request.data.copy()
-        data['user'] = str(request.user.id)
-
-        serializer = self.get_serializer(data=data)
-
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
-        headers = self.get_success_headers(serializer.data)
-        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
-
-    permission_classes = [
-        permissions.IsAuthenticated,
-    ]
-
-    filter_backends = [
-        DjangoFilterBackend,
-        filters.SearchFilter
-    ]
-
-    filter_fields = [
-        'part',
-        'user',
-    ]
-
-    search_fields = [
-        'partname'
+        'category__name',
     ]
 
 
@@ -746,6 +735,15 @@ class PartParameterList(generics.ListCreateAPIView):
         'part',
         'template',
     ]
+
+
+class PartParameterDetail(generics.RetrieveUpdateDestroyAPIView):
+    """
+    API endpoint for detail view of a single PartParameter object
+    """
+
+    queryset = PartParameter.objects.all()
+    serializer_class = part_serializers.PartParameterSerializer
 
 
 class BomList(generics.ListCreateAPIView):
@@ -810,17 +808,35 @@ class BomList(generics.ListCreateAPIView):
 
             queryset = queryset.filter(optional=optional)
 
+        # Filter by "inherited" status
+        inherited = params.get('inherited', None)
+
+        if inherited is not None:
+            inherited = str2bool(inherited)
+
+            queryset = queryset.filter(inherited=inherited)
+
         # Filter by part?
         part = params.get('part', None)
 
         if part is not None:
-            queryset = queryset.filter(part=part)
-        
-        # Filter by sub-part?
-        sub_part = params.get('sub_part', None)
+            """
+            If we are filtering by "part", there are two cases to consider:
 
-        if sub_part is not None:
-            queryset = queryset.filter(sub_part=sub_part)
+            a) Bom items which are defined for *this* part
+            b) Inherited parts which are defined for a *parent* part
+
+            So we need to construct two queries!
+            """
+
+            # First, check that the part is actually valid!
+            try:
+                part = Part.objects.get(pk=part)
+
+                queryset = queryset.filter(part.get_bom_item_filter())
+
+            except (ValueError, Part.DoesNotExist):
+                pass
 
         # Filter by "active" status of the part
         part_active = params.get('part_active', None)
@@ -928,12 +944,6 @@ part_api_urls = [
     url(r'^attachment/', include([
         url(r'^$', PartAttachmentList.as_view(), name='api-part-attachment-list'),
     ])),
-    
-    # Base URL for PartStar API endpoints
-    url(r'^star/', include([
-        url(r'^(?P<pk>\d+)/?', PartStarDetail.as_view(), name='api-part-star-detail'),
-        url(r'^$', PartStarList.as_view(), name='api-part-star-list'),
-    ])),
 
     # Base URL for part sale pricing
     url(r'^sale-price/', include([
@@ -943,6 +953,8 @@ part_api_urls = [
     # Base URL for PartParameter API endpoints
     url(r'^parameter/', include([
         url(r'^template/$', PartParameterTemplateList.as_view(), name='api-part-param-template-list'),
+
+        url(r'^(?P<pk>\d+)/', PartParameterDetail.as_view(), name='api-part-param-detail'),
         url(r'^.*$', PartParameterList.as_view(), name='api-part-param-list'),
     ])),
 

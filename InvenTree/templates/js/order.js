@@ -59,7 +59,7 @@ function newPurchaseOrderFromOrderWizard(e) {
 
     var src = e.target || e.srcElement;
 
-    var supplier = $(src).attr('supplier-id');
+    var supplier = $(src).attr('supplierid');
 
     launchModalForm("/order/purchase-order/new/", {
         modal: '#modal-form-secondary',
@@ -124,6 +124,8 @@ function loadPurchaseOrderTable(table, options) {
         filters[key] = options.params[key];
     }
 
+    options.url = options.url || '{% url "api-po-list" %}';
+
     setupFilterList("purchaseorder", $(table));
 
     $(table).inventreeTable({
@@ -131,19 +133,20 @@ function loadPurchaseOrderTable(table, options) {
         queryParams: filters,
         name: 'purchaseorder',
         groupBy: false,
+        sidePagination: 'server',
         original: options.params,
         formatNoMatches: function() { return '{% trans "No purchase orders found" %}'; },
         columns: [
             {
-                field: 'pk',
-                title: 'ID',
-                visible: false,
+                title: '',
+                visible: true,
+                checkbox: true,
                 switchable: false,
             },
             {
-                sortable: true,
                 field: 'reference',
                 title: '{% trans "Purchase Order" %}',
+                sortable: true,
                 switchable: false,
                 formatter: function(value, row, index, field) {
 
@@ -153,13 +156,20 @@ function loadPurchaseOrderTable(table, options) {
                         value = `${prefix}${value}`;
                     }
 
-                    return renderLink(value, `/order/purchase-order/${row.pk}/`);
+                    var html = renderLink(value, `/order/purchase-order/${row.pk}/`);
+
+                    if (row.overdue) {
+                        html += makeIconBadge('fa-calendar-times icon-red', '{% trans "Order is overdue" %}');
+                    }
+
+                    return html;
                 }
             },  
             {
-                sortable: true,
                 field: 'supplier_detail',
                 title: '{% trans "Supplier" %}',
+                sortable: true,
+                sortName: 'supplier__name',
                 formatter: function(value, row, index, field) {
                     return imageHoverIcon(row.supplier_detail.image) + renderLink(row.supplier_detail.name, `/company/${row.supplier}/purchase-orders/`);
                 }
@@ -167,30 +177,33 @@ function loadPurchaseOrderTable(table, options) {
             {
                 field: 'supplier_reference',
                 title: '{% trans "Supplier Reference" %}',
-                sortable: true,
             },
             {
-                sortable: true,
                 field: 'description',
                 title: '{% trans "Description" %}',
             },
             {
-                sortable: true,
                 field: 'status',
                 title: '{% trans "Status" %}',
+                sortable: true,
                 formatter: function(value, row, index, field) {
                     return purchaseOrderStatusDisplay(row.status, row.status_text);
                 }
             },
             {
-                sortable: true,
                 field: 'creation_date',
                 title: '{% trans "Date" %}',
+                sortable: true,
             },
             {
+                field: 'target_date',
+                title: '{% trans "Target Date" %}',
                 sortable: true,
+            },
+            {
                 field: 'line_items',
-                title: '{% trans "Items" %}'
+                title: '{% trans "Items" %}',
+                sortable: true,
             },
         ],
     });
@@ -207,6 +220,8 @@ function loadSalesOrderTable(table, options) {
         filters[key] = options.params[key];
     }
 
+    options.url = options.url || '{% url "api-so-list" %}';
+
     setupFilterList("salesorder", $(table));
 
     $(table).inventreeTable({
@@ -214,13 +229,14 @@ function loadSalesOrderTable(table, options) {
         queryParams: filters,
         name: 'salesorder',
         groupBy: false,
+        sidePagination: 'server',
         original: options.params,
         formatNoMatches: function() { return '{% trans "No sales orders found" %}'; },
         columns: [
             {
-                field: 'pk',
-                title: 'ID',
-                visible: false,
+                title: '',
+                checkbox: true,
+                visible: true,
                 switchable: false,
             },
             {
@@ -246,6 +262,7 @@ function loadSalesOrderTable(table, options) {
             },
             {
                 sortable: true,
+                sortName: 'customer__name',
                 field: 'customer_detail',
                 title: '{% trans "Customer" %}',
                 formatter: function(value, row, index, field) {
@@ -253,12 +270,12 @@ function loadSalesOrderTable(table, options) {
                 }
             },
             {
+                sortable: true,
                 field: 'customer_reference',
                 title: '{% trans "Customer Reference" %}',
-                sotrable: true,
             },
             {
-                sortable: true,
+                sortable: false,
                 field: 'description',
                 title: '{% trans "Description" %}',
             },

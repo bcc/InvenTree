@@ -4,6 +4,7 @@ JSON serializers for Part app
 import imghdr
 from decimal import Decimal
 
+from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Coalesce
 from InvenTree.serializers import (InvenTreeAttachmentSerializerField,
@@ -208,7 +209,8 @@ class PartSerializer(InvenTreeModelSerializer):
         queryset = queryset.annotate(
             in_stock=Coalesce(
                 SubquerySum('stock_items__quantity', filter=StockItem.IN_STOCK_FILTER),
-                Decimal(0)
+                Decimal(0),
+                output_field=models.DecimalField(),
             ),
         )
 
@@ -227,6 +229,7 @@ class PartSerializer(InvenTreeModelSerializer):
             building=Coalesce(
                 SubquerySum('builds__quantity', filter=build_filter),
                 Decimal(0),
+                output_field=models.DecimalField(),
             )
         )
         
@@ -240,10 +243,21 @@ class PartSerializer(InvenTreeModelSerializer):
             ordering=Coalesce(
                 SubquerySum('supplier_parts__purchase_order_line_items__quantity', filter=order_filter),
                 Decimal(0),
+                output_field=models.DecimalField(),
             ) - Coalesce(
                 SubquerySum('supplier_parts__purchase_order_line_items__received', filter=order_filter),
                 Decimal(0),
+                output_field=models.DecimalField(),
             )
+        )
+
+        # Annotate with the number of 'suppliers'
+        queryset = queryset.annotate(
+            suppliers=Coalesce(
+                SubqueryCount('supplier_parts'),
+                Decimal(0),
+                output_field=models.DecimalField(),
+            ),
         )
         
         return queryset
@@ -263,6 +277,7 @@ class PartSerializer(InvenTreeModelSerializer):
     ordering = serializers.FloatField(read_only=True)
     building = serializers.FloatField(read_only=True)
     stock_item_count = serializers.IntegerField(read_only=True)
+    suppliers = serializers.IntegerField(read_only=True)
 
     image = serializers.CharField(source='get_image_url', read_only=True)
     thumbnail = serializers.CharField(source='get_thumbnail_url', read_only=True)
@@ -308,6 +323,7 @@ class PartSerializer(InvenTreeModelSerializer):
             'salable',
             'starred',
             'stock_item_count',
+            'suppliers',
             'thumbnail',
             'trackable',
             'units',
@@ -381,17 +397,18 @@ class BomItemSerializer(InvenTreeModelSerializer):
     class Meta:
         model = BomItem
         fields = [
+            'inherited',
+            'note',
+            'optional',
+            'overage',
             'pk',
             'part',
             'part_detail',
-            'sub_part',
-            'sub_part_detail',
             'quantity',
             'reference',
+            'sub_part',
+            'sub_part_detail',
             # 'price_range',
-            'optional',
-            'overage',
-            'note',
             'validated',
         ]
 
